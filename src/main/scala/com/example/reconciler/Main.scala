@@ -2,7 +2,7 @@ package com.example.reconciler
 
 import com.example.reconciler.config.{OracleConfigFetcher, ReconciliationJobConfig}
 import com.example.reconciler.readers.DataSourceReaderFactory
-import com.example.reconciler.services.ReconciliationService
+import com.example.reconciler.services.{ReconciliationService, OutputService, EmailService} // Added OutputService, EmailService
 import com.example.reconciler.models._ // Wildcard import
 import org.apache.spark.sql.SparkSession
 import java.time.Instant
@@ -84,23 +84,77 @@ object Main {
             finalSchemaReconResult = Some(schemaReconResult)
           }
 
+          var finalDataMatchingResult: Option[DataMatchingResult] = None
+          var finalValueComparisonResult: Option[ValueComparisonResult] = None
+          var sourceOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+          var targetOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+          var mismatchesDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+
           if (jobConfig.performDataReconciliation) {
-            println("\n--- Data Reconciliation (Placeholder) ---")
-            // Placeholder: This will be implemented and its result will also affect currentOverallStatus
-            // and be added to jobSummary
+            println("\n--- Performing Data Matching (Key-based) ---")
+            val dataMatchingResult = reconService.performDataMatching(sourceDf, targetDf, jobConfig)
+            finalDataMatchingResult = Some(dataMatchingResult)
+            sourceOnlyDfForOutput = Some(dataMatchingResult.sourceOnlyRecordsDf)
+            targetOnlyDfForOutput = Some(dataMatchingResult.targetOnlyRecordsDf)
+
+            println(dataMatchingResult.summaryMessage)
+            if (dataMatchingResult.status == Failure) currentOverallStatus = Failure // e.g. if PKs were missing
+
+            if (dataMatchingResult.matchedKeyCount > 0) {
+              println("\n--- Performing Column Value Comparison ---")
+              val valueCompResult = reconService.compareColumnValues(dataMatchingResult.matchedRecordsDf, jobConfig)
+              finalValueComparisonResult = Some(valueCompResult)
+              mismatchesDfForOutput = Some(valueCompResult.mismatchedRecordsDf)
+              println(valueCompResult.summaryMessage)
+              if (valueCompResult.status == Failure) currentOverallStatus = Failure
+            } else {
+              println("INFO: No matched keys found, skipping column value comparison.")
+            }
           }
 
-          // Update jobSummary with results
+          var finalBusinessRuleResults: Option[Seq[BusinessRuleResult]] = None
+          jobConfig.businessRules.filter(_.nonEmpty).foreach { rules =>
+            println("\n--- Executing Business Rules ---")
+            val bizRuleResults = reconService.executeBusinessRules(rules)
+            finalBusinessRuleResults = Some(bizRuleResults)
+            bizRuleResults.foreach { brr =>
+              println(s"Rule: ${brr.ruleName}, Status: ${brr.status}, Expected: ${brr.expectedResult.getOrElse("N/A")}, Actual: ${brr.actualResult.getOrElse("N/A")}, Remarks: ${brr.remarks.getOrElse("")}")
+              if (brr.status == Failure) currentOverallStatus = Failure
+            }
+          }
+
+          val jobEndTime = Instant.now().toEpochMilli
           jobSummary = jobSummary.map(_.copy(
             rowCountResult = finalRowCountResult,
             schemaReconResult = finalSchemaReconResult,
-            overallStatus = currentOverallStatus, // This might be updated again after data recon
-            endTime = Some(Instant.now().toEpochMilli)
+            dataMatchingResult = finalDataMatchingResult,
+            valueComparisonResult = finalValueComparisonResult,
+            businessRuleResults = finalBusinessRuleResults,
+            overallStatus = currentOverallStatus,
+            endTime = Some(jobEndTime)
           ))
 
           println(s"\n--- Overall Job Status for ${jobConfig.jobName}: ${jobSummary.get.overallStatus} ---")
-          jobSummary.foreach(s => println(s"Job Summary: $s"))
+          // jobSummary.foreach(s => println(s"Job Summary (full object): $s")) // Can be very verbose
 
+          // 5. Output Results
+          jobSummary.foreach { summary =>
+            val outputService = new OutputService()
+            jobConfig.hdfsOutput.foreach { hdfsConf =>
+              outputService.saveToHdfs(summary, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hdfsConf)
+            }
+            jobConfig.hiveOutput.foreach { hiveConf =>
+              // For Hive, sourceOnly and targetOnly might need separate handling if desired
+              outputService.saveToHive(summary, mismatchesDfForOutput, hiveConf)
+            }
+            jobConfig.emailNotifications.filter(_.enabled).foreach { emailConf =>
+               val emailService = new EmailService()
+               emailService.sendReconReport(summary, emailConf) match {
+                 case scala.util.Success(_) => println("INFO: Email report dispatch initiated.")
+                 case scala.util.Failure(e) => println(s"ERROR: Failed to send email report: ${e.getMessage}")
+               }
+            }
+          }
 
         case None =>
           val fatalErrorMsg = s"FATAL: Could not fetch or load configuration for job ID: $jobIdArg. Exiting."
