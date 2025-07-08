@@ -26,7 +26,11 @@ object Main {
     val errorMessages = ListBuffer[String]()
 
     try {
-      val jobConfigOpt: Option[ReconciliationJobConfig] = OracleConfigFetcher.fetchConfig(jobIdArg)
+      // Define a placeholder API base URL. In a real app, this would come from a config file.
+      val apiBaseUrl = "http://your-api-server.com/api/recon-configs" // Replace with actual or make configurable
+      println(s"INFO: Using API Base URL: $apiBaseUrl")
+
+      val jobConfigOpt: Option[ReconciliationJobConfig] = OracleConfigFetcher.fetchConfig(jobIdArg, apiBaseUrl)
 
       jobConfigOpt match {
         case Some(jobConfig) =>

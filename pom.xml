@@ -66,7 +66,84 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Spark Excel Reader -->
+        <dependency>
+            <groupId>com.crealytics</groupId>
+            <artifactId>spark-excel_${scala.compat.version}</artifactId>
+            <version>0.12.2</version> <!-- Check compatibility, 0.13.x might be for Scala 2.12 -->
+        </dependency>
+
+        <!-- Oracle JDBC Driver - Placeholder, manage manually or via private repo -->
+        <!--
+        <dependency>
+            <groupId>com.oracle.ojdbc</groupId>
+            <artifactId>ojdbc8</artifactId>
+            <version>19.3.0.0</version>
+        </dependency>
+        -->
+
+        <!-- Emailing -->
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-email</artifactId>
+            <version>1.5</version>
+        </dependency>
+        <dependency>
+            <groupId>javax.mail</groupId>
+            <artifactId>mail</artifactId>
+            <version>1.4.7</version>
+        </dependency>
+
+        <!-- HTTP Client -->
+        <dependency>
+            <groupId>com.lihaoyi</groupId>
+            <artifactId>requests_${scala.compat.version}</artifactId>
+            <version>0.7.1</version>
+        </dependency>
+
+        <!-- JSON Parsing -->
+        <dependency>
+            <groupId>org.json4s</groupId>
+            <artifactId>json4s-native_${scala.compat.version}</artifactId>
+            <version>3.5.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.json4s</groupId>
+            <artifactId>json4s-ext_${scala.compat.version}</artifactId>
+            <version>3.5.5</version>
+        </dependency>
+
+        <!-- Spark Testing Base for easier Spark unit testing (Temporarily commented out) -->
+        <!--
+        <dependency>
+            <groupId>com.holdenkarau</groupId>
+            <artifactId>spark-testing-base_${scala.compat.version}</artifactId>
+            <version>${spark.version}_0.14.0</version>
+            <scope>test</scope>
+        </dependency>
+        -->
+
     </dependencies>
+
+    <repositories> <!-- Added repositories which might have been missing -->
+        <repository>
+            <id>spark-packages</id>
+            <url>https://dl.bintray.com/spark-packages/maven/</url>
+        </repository>
+        <repository>
+            <id>central</id>
+            <url>https://repo.maven.apache.org/maven2</url>
+        </repository>
+         <repository>
+            <id>typesafe</id>
+            <name>Typesafe Simple Repository</name>
+            <url>https://repo.typesafe.com/typesafe/simple/maven-releases/</url>
+        </repository>
+        <repository>
+            <id>sonatype-public</id>
+            <url>https://oss.sonatype.org/content/repositories/public/</url>
+        </repository>
+    </repositories>
 
     <build>
         <sourceDirectory>src/main/scala</sourceDirectory>

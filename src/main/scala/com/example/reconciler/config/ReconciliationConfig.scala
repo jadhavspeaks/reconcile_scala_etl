@@ -92,87 +92,121 @@ case class ReconciliationJobConfig(
   emailNotifications: Option[EmailConfig] = None,
   // Advanced options
   sampleMismatchLimit: Int = 100, // Max number of mismatches to include in detailed report
-  errorTolerancePercentage: Option[Double] = None // If overall error % is above this, maybe fail the job
+  errorTolerancePercentage: Option[Double] = None, // If overall error % is above this, maybe fail the job
+  timeoutSeconds: Option[Int] = Some(60) // Timeout for API calls
 )
 
-/**
- * Placeholder for the Oracle Configuration Fetcher.
- * This would involve using JDBC to connect to Oracle, execute a query/stored procedure,
- * and map the results to the ReconciliationJobConfig case class.
- */
 object OracleConfigFetcher {
+  import org.json4s._
+  import org.json4s.native.JsonMethods._
+  import org.json4s.ext.EnumNameSerializer
+  import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
+
+  // Define a custom serializer for the DataSourceConfig sealed trait
+  // This tells json4s how to distinguish between SourceFileConfig and SourceHiveTableConfig
+  // based on a type hint field (e.g., "sourceType" or by structure if unambiguous)
+  // For simplicity, we'll rely on json4s's default behavior for case classes,
+  // but for sealed traits with non-obvious distinctions in JSON, a custom serializer or hints are needed.
+  // Let's assume the JSON will have a field that distinguishes, or the structure is distinct enough.
+  // A common way is to add a "type" field in the JSON.
+  // If JSON structure for sourceConfig is like:
+  // { "fileConfig": { ... } } OR { "hiveConfig": { ... } }
+  // json4s can often handle this.
+
+  implicit val formats: Formats = DefaultFormats + new EnumNameSerializer(FileFormat) + FieldSerializer[SourceFileConfig]() + FieldSerializer[SourceHiveTableConfig]()
+
+
   /**
-   * Fetches the reconciliation job configuration from an Oracle database.
-   *
-   * This is a placeholder implementation. The actual implementation would require:
-   * - Oracle JDBC driver on the classpath.
-   * - Connection details for the Oracle database (could be part of a separate app config).
-   * - SQL query or stored procedure name to fetch the configuration.
-   * - Logic to parse the ResultSet and populate the ReconciliationJobConfig object.
-   *   This might involve mapping columns from a config table to the case class fields.
-   *   Complex configurations (like nested Seq of columns) might be stored as JSON/XML in Oracle
-   *   or across multiple related tables.
+   * Fetches the reconciliation job configuration from an API endpoint.
    *
    * @param reconJobId The ID of the reconciliation job to fetch.
-   * @param sparkSession Implicit SparkSession, useful if config is in a table Spark can read.
+   * @param apiBaseUrl The base URL for the configuration API.
    * @return Option[ReconciliationJobConfig]
    */
-  def fetchConfig(reconJobId: String)(implicit sparkSession: org.apache.spark.sql.SparkSession): Option[ReconciliationJobConfig] = {
-    println(s"INFO: Attempting to fetch configuration for job ID: $reconJobId (Placeholder Implementation)")
+  def fetchConfig(reconJobId: String, apiBaseUrl: String): Option[ReconciliationJobConfig] = {
+    val apiUrl = s"$apiBaseUrl/$reconJobId"
+    val apiKey = "dummy-key-value" // Placeholder for actual API key retrieval
+    val timeoutMillis = 30000 // 30 seconds connect and read timeout
 
-    // Example: Simulating fetching a config.
-    // In a real scenario, this would be JDBC calls, parsing JSON from a column, etc.
-    if (reconJobId == "sampleReconJob1") {
-      Some(
-        ReconciliationJobConfig(
-          jobId = "sampleReconJob1",
-          jobName = "Sample CSV to Hive Reconciliation",
-          sourceConfig = SourceFileConfig(FileSourceConfig(
-            path = "hdfs:///user/data/input/sample_source.csv",
-            format = FileFormat.CSV,
-            delimiter = Some(","),
-            header = Some(true),
-            inferSchema = Some(true)
-            // customSchema = Some(Seq(
-            //   SchemaColumnConfig("id", "IntegerType"),
-            //   SchemaColumnConfig("name", "StringType"),
-            //   SchemaColumnConfig("value", "DoubleType"),
-            //   SchemaColumnConfig("event_date", "DateType", format = Some("yyyy-MM-dd"))
-            // ))
-          )),
-          targetConfig = SourceHiveTableConfig(HiveSourceConfig(
-            databaseName = "raw_db",
-            tableName = "source_mirror_table"
-          )),
-          primaryKeyColumns = Seq("id"),
-          columnsToCompare = Seq(
-            ReconColumnConfig("id", isPrimaryKey = true),
-            ReconColumnConfig("name", ignoreCase = Some(true), trimWhitespace = Some(true)),
-            ReconColumnConfig("value", tolerance = Some(0.001)),
-            ReconColumnConfig("event_date")
-          ),
-          performRowCountCheck = true,
-          performSchemaCheck = true,
-          performDataReconciliation = true,
-          hdfsOutput = Some(HdfsOutputConfig(
-            path = "hdfs:///user/data/recon_output/sampleReconJob1"
-          )),
-          hiveOutput = Some(HiveOutputConfig(
-            databaseName = "recon_db",
-            summaryTableName = "recon_summary_sampleReconJob1",
-            mismatchTableName = "recon_mismatches_sampleReconJob1"
-          )),
-          emailNotifications = Some(EmailConfig(
-            recipients = Seq("user1@example.com", "user2@example.com"),
-            smtpHost = "smtp.example.com",
-            smtpPort = 587
-          )),
-          sampleMismatchLimit = 200
-        )
+    println(s"INFO: Attempting to fetch configuration for job ID: $reconJobId from $apiUrl")
+
+    Try {
+      val response = requests.get(
+        apiUrl,
+        headers = Map("X-API-Key" -> apiKey, "Accept" -> "application/json"),
+        connectTimeout = timeoutMillis,
+        readTimeout = timeoutMillis
       )
-    } else {
-      println(s"ERROR: No configuration found for job ID: $reconJobId")
-      None
+
+      if (response.statusCode == 200) {
+        val jsonString = response.text()
+        println(s"DEBUG: Received JSON response: $jsonString") // For debugging, remove in prod
+        parse(jsonString).extract[ReconciliationJobConfig]
+      } else {
+        println(s"ERROR: Failed to fetch config for $reconJobId. Status: ${response.statusCode}, Body: ${response.text()}")
+        throw new RuntimeException(s"API request failed with status ${response.statusCode}")
+      }
+    } match {
+      case TrySuccess(config) => Some(config)
+      case TryFailure(ex: requests.RequestsException) =>
+        println(s"ERROR: HTTP request to API failed for job $reconJobId: ${ex.getMessage}")
+        ex.printStackTrace()
+        None
+      case TryFailure(ex: org.json4s.MappingException) =>
+        println(s"ERROR: Failed to parse JSON configuration for job $reconJobId: ${ex.getMessage}")
+        ex.printStackTrace()
+        None
+      case TryFailure(ex) =>
+        println(s"ERROR: An unexpected error occurred while fetching/parsing config for job $reconJobId: ${ex.getMessage}")
+        ex.printStackTrace()
+        None
     }
+  }
+
+  // Sample JSON generation for testing (if API is not available)
+  def generateSampleJsonForJob(jobId: String): String = {
+    implicit val formats: Formats = DefaultFormats + new EnumNameSerializer(FileFormat) + FieldSerializer[SourceFileConfig]() + FieldSerializer[SourceHiveTableConfig]()
+    import org.json4s.native.Serialization.writePretty
+
+    val sampleConfig = ReconciliationJobConfig(
+      jobId = jobId,
+      jobName = s"Sample $jobId Type Reconciliation",
+      sourceConfig = SourceFileConfig(FileSourceConfig(
+        path = s"hdfs:///user/data/input/$jobId.csv",
+        format = FileFormat.CSV,
+        delimiter = Some(","),
+        header = Some(true),
+        inferSchema = Some(true),
+        customSchema = Some(Seq(
+          SchemaColumnConfig("id", "IntegerType", nullable = false),
+          SchemaColumnConfig("name", "StringType"),
+          SchemaColumnConfig("value", "DoubleType", format = Some("0.00")),
+          SchemaColumnConfig("event_date", "DateType", format = Some("yyyy-MM-dd"))
+        ))
+      )),
+      targetConfig = SourceHiveTableConfig(HiveSourceConfig(
+        databaseName = "raw_db",
+        tableName = s"${jobId}_target_table"
+      )),
+      primaryKeyColumns = Seq("id"),
+      columnsToCompare = Seq(
+        ReconColumnConfig("id", isPrimaryKey = true),
+        ReconColumnConfig("name", ignoreCase = Some(true), trimWhitespace = Some(true)),
+        ReconColumnConfig("value", tolerance = Some(0.001)),
+        ReconColumnConfig("event_date")
+      ),
+      emailNotifications = Some(EmailConfig(
+        recipients = Seq("test@example.com"),
+        smtpHost = "smtp.example.com",
+        smtpPort = 587
+      )),
+      timeoutSeconds = Some(120)
+    )
+    writePretty(sampleConfig)
+  }
+
+  // Main for quick testing of JSON generation
+  def main(args: Array[String]): Unit = {
+    println(generateSampleJsonForJob("sampleReconJob1"))
   }
 }
