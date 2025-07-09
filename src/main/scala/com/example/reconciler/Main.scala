@@ -1,13 +1,14 @@
 package com.example.reconciler
 
-import com.example.reconciler.config.{OracleConfigFetcher, ReconciliationJobConfig}
+import com.example.reconciler.config.{JdbcConfigFetcher, ReconciliationJobConfig} // Changed OracleConfigFetcher to JdbcConfigFetcher
 import com.example.reconciler.readers.DataSourceReaderFactory
-import com.example.reconciler.services.{ReconciliationService, OutputService, EmailService} // Added OutputService, EmailService
-import com.example.reconciler.models._ // Wildcard import
+import com.example.reconciler.services.{ReconciliationService, OutputService, EmailService}
+import com.example.reconciler.models._
 import org.apache.spark.sql.SparkSession
-import org.slf4j.LoggerFactory // Added for logging
+import org.slf4j.LoggerFactory
 import java.time.Instant
 import scala.collection.mutable.ListBuffer
+import scala.util.{Success => TrySuccess, Failure => TryFailure} // For Try matching
 
 object Main {
   private val logger = LoggerFactory.getLogger(Main.getClass)
@@ -23,215 +24,204 @@ object Main {
       // .master("local[*]") // Uncomment for local testing
       .getOrCreate()
 
-    var jobSummary: Option[ReconciliationJobSummary] = None
-    val errorMessages = ListBuffer[String]()
+    // jobIdArg might be a specific job name to filter by, or None if all jobs from query are to be run.
+    // If args is empty, jobIdArg becomes "sampleReconJob1", which we can treat as a filter.
+    // If args has a value, that's the filter.
+    // If RECON_JOBS_SQL_QUERY is general and returns multiple, and jobIdArg is not a specific filter, all will run.
+    val jobNameFilter: Option[String] = if (args.isEmpty && jobIdArg == "sampleReconJob1") {
+      // If default "sampleReconJob1" is used because no args, and SQL is general, maybe run all.
+      // However, for now, let's assume jobIdArg always means a filter if provided.
+      // If you want to run ALL jobs from the DB when no arg is given, jobNameFilter should be None.
+      // This depends on the desired behavior of an empty `args`.
+      // For now, if jobIdArg has a value (even default), use it as a filter.
+      // To run all jobs, the user would need to modify the calling script or this logic.
+      // A more explicit way: pass a special arg like "--all-jobs" or rely on RECON_JOBS_SQL_QUERY to not have a WHERE clause.
+      // For now, simplifying: if jobIdArg is passed (even if it's the default "sampleReconJob1"), we filter by it.
+      // To run for *all* jobs from the DB query, the user would need to ensure RECON_JOBS_SQL_QUERY fetches all
+      // and potentially modify this Main to pass None to fetchAllConfigs if no specific job name is given.
+      // Let's make it so if jobIdArg is provided, it's a filter. If no arg is provided, fetchAllConfigs gets None.
+      args.headOption // This will be None if args is empty, Some(jobIdArg) otherwise.
+    } else {
+      args.headOption // Standard case: use the first argument as the filter.
+    }
+
+
+    var overallApplicationStatus = TrySuccess(()) // To track if any config parsing or job execution failed
 
     try {
-      // Determine API Base URL: Spark conf -> CLI arg -> Default
-      val defaultApiBaseUrl = "http://your-api-server.com/api/recon-configs" // Placeholder
-      val apiBaseUrlFromSparkConf = spark.conf.getOption("spark.reconciler.apiBaseUrl")
-      val apiBaseUrlFromCli = if (args.length > 1) Some(args(1)) else None
+      val fetchedConfigs: List[Try[ReconciliationJobConfig]] = JdbcConfigFetcher.fetchAllConfigs(jobNameFilter)
 
-      val apiBaseUrl = apiBaseUrlFromSparkConf.orElse(apiBaseUrlFromCli).getOrElse {
-        logger.warn(s"API Base URL not found in Spark config (spark.reconciler.apiBaseUrl) or CLI argument. Using default: $defaultApiBaseUrl")
-        defaultApiBaseUrl
-      }
-      logger.info(s"Using API Base URL: $apiBaseUrl")
-
-      val jobConfigOpt: Option[ReconciliationJobConfig] = OracleConfigFetcher.fetchConfig(jobIdArg, apiBaseUrl)
-
-      jobConfigOpt match {
-        case Some(jobConfig) =>
-          jobSummary = Some(ReconciliationJobSummary(
-            jobId = jobConfig.jobId,
-            jobName = jobConfig.jobName,
-            overallStatus = Success, // Initial status
-            startTime = appStartTime
-          ))
-
-          logger.info(s"Successfully fetched configuration for job: ${jobConfig.jobName}")
-          // logger.debug(s"Source: ${jobConfig.sourceConfig}") // Verbose
-          // logger.debug(s"Target: ${jobConfig.targetConfig}") // Verbose
-
-          val sourceReader = DataSourceReaderFactory.getReader(jobConfig.sourceConfig)
-          val targetReader = DataSourceReaderFactory.getReader(jobConfig.targetConfig)
-
-          logger.info("Loading source DataFrame...")
-          val sourceDf = sourceReader.read(jobConfig.sourceConfig)
-          logger.info("Source DataFrame loaded.")
-          // sourceDf.printSchema() // Potentially log schema at DEBUG level if needed
-
-          logger.info("Loading target DataFrame...")
-          val targetDf = targetReader.read(jobConfig.targetConfig)
-          logger.info("Target DataFrame loaded.")
-          // targetDf.printSchema() // Potentially log schema at DEBUG level if needed
-
-          val reconService = new ReconciliationService()
-          var currentOverallStatus: ReconStatus = Success
-
-          var finalRowCountResult: Option[RowCountReconResult] = None
-          if (jobConfig.performRowCountCheck) {
-            logger.info("\n--- Performing Row Count Check ---")
-            val rowCountResult = reconService.compareRowCounts(sourceDf, targetDf, jobConfig)
-            logger.info(s"Row Count Result: ${rowCountResult.status}")
-            logger.info(rowCountResult.summaryMessage)
-            if (rowCountResult.status == Failure) currentOverallStatus = Failure
-            finalRowCountResult = Some(rowCountResult)
-          }
-
-          var finalSchemaReconResult: Option[SchemaReconResult] = None
-          if (jobConfig.performSchemaCheck) {
-            logger.info("\n--- Performing Schema Check ---")
-            val schemaReconResult = reconService.compareSchemas(sourceDf, targetDf, jobConfig)
-            logger.info(s"Schema Recon Result: ${schemaReconResult.status}")
-            logger.info(schemaReconResult.summaryMessage)
-            schemaReconResult.fieldComparisons.filter(!_.isMatch).foreach { comp =>
-              logger.info(s"  MISMATCH: Field: ${comp.fieldName}, Source: ${comp.sourceDataType.getOrElse("N/A")}, Target: ${comp.targetDataType.getOrElse("N/A")}, Remarks: ${comp.remarks.getOrElse("")}")
-            }
-            if (schemaReconResult.status == Failure) currentOverallStatus = Failure
-            finalSchemaReconResult = Some(schemaReconResult)
-          }
-
-          var finalDataMatchingResult: Option[DataMatchingResult] = None
-          var finalValueComparisonResult: Option[ValueComparisonResult] = None
-          var sourceOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
-          var targetOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
-          var mismatchesDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
-
-          if (jobConfig.performDataReconciliation) {
-            logger.info("\n--- Performing Data Matching (Key-based) ---")
-            val dataMatchingResult = reconService.performDataMatching(sourceDf, targetDf, jobConfig)
-            finalDataMatchingResult = Some(dataMatchingResult)
-            sourceOnlyDfForOutput = Some(dataMatchingResult.sourceOnlyRecordsDf)
-            targetOnlyDfForOutput = Some(dataMatchingResult.targetOnlyRecordsDf)
-
-            logger.info(dataMatchingResult.summaryMessage)
-            if (dataMatchingResult.status == Failure) currentOverallStatus = Failure
-
-            if (dataMatchingResult.matchedKeyCount > 0) {
-              logger.info("\n--- Performing Column Value Comparison ---")
-              val valueCompResult = reconService.compareColumnValues(dataMatchingResult.matchedRecordsDf, jobConfig)
-              finalValueComparisonResult = Some(valueCompResult)
-              mismatchesDfForOutput = Some(valueCompResult.mismatchedRecordsDf)
-              logger.info(valueCompResult.summaryMessage)
-              if (valueCompResult.status == Failure) currentOverallStatus = Failure
-            } else {
-              logger.info("No matched keys found, skipping column value comparison.")
-            }
-          }
-
-          var finalBusinessRuleResults: Option[Seq[BusinessRuleResult]] = None
-          jobConfig.businessRules.filter(_.nonEmpty).foreach { rules =>
-            logger.info("\n--- Executing Business Rules ---")
-            val bizRuleResults = reconService.executeBusinessRules(rules)
-            finalBusinessRuleResults = Some(bizRuleResults)
-            bizRuleResults.foreach { brr =>
-              logger.info(s"Rule: ${brr.ruleName}, Status: ${brr.status}, Expected: ${brr.expectedResult.getOrElse("N/A")}, Actual: ${brr.actualResult.getOrElse("N/A")}, Remarks: ${brr.remarks.getOrElse("")}")
-              if (brr.status == Failure) currentOverallStatus = Failure
-            }
-          }
-
-          val jobEndTime = Instant.now().toEpochMilli
-          jobSummary = jobSummary.map(_.copy(
-            rowCountResult = finalRowCountResult,
-            schemaReconResult = finalSchemaReconResult,
-            dataMatchingResult = finalDataMatchingResult,
-            valueComparisonResult = finalValueComparisonResult,
-            businessRuleResults = finalBusinessRuleResults,
-            overallStatus = currentOverallStatus,
-            endTime = Some(jobEndTime)
-          ))
-
-          logger.info(s"\n--- Overall Job Status for ${jobConfig.jobName}: ${jobSummary.get.overallStatus} ---")
-          // logger.debug(s"Job Summary (full object): ${jobSummary.get}") // Can be very verbose
-
-          // 5. Output Results
-          jobSummary.foreach { summary =>
-            val outputService = new OutputService()
-            jobConfig.hdfsOutput.foreach { hdfsConf =>
-              outputService.saveToHdfs(summary, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hdfsConf)
-            }
-            jobConfig.hiveOutput.foreach { hiveConf =>
-              outputService.saveToHive(summary, jobConfig, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hiveConf)
-            }
-            jobConfig.emailNotifications.filter(_.enabled).foreach { emailConf =>
-               val emailService = new EmailService()
-               emailService.sendReconReport(summary, emailConf) match {
-                 case scala.util.Success(_) => logger.info("Email report dispatch initiated.")
-                 case scala.util.Failure(e) => logger.error(s"Failed to send email report: ${e.getMessage}", e)
-               }
-            }
-          }
-
-        case None =>
-          val fatalErrorMsg = s"FATAL: Could not fetch or load configuration for job ID: $jobIdArg. Exiting."
-          logger.error(fatalErrorMsg)
-          errorMessages += fatalErrorMsg
-          jobSummary = Some(ReconciliationJobSummary( // Create a minimal summary for failure case
-            jobId = jobIdArg,
-            jobName = "Unknown (Config Fetch Failed)",
-            overallStatus = Failure,
-            startTime = appStartTime,
-            endTime = Some(Instant.now().toEpochMilli),
-            errorMessages = errorMessages.toSeq
-          ))
-          // System.exit(1) // Decided to let finally block handle logging
+      if (fetchedConfigs.isEmpty) {
+        if (jobNameFilter.isDefined) {
+          logger.warn(s"No job configurations found for job name filter: ${jobNameFilter.get}. Exiting.")
+        } else {
+          logger.warn("No job configurations found from JDBC query. Exiting.")
+        }
+        overallApplicationStatus = TryFailure(new RuntimeException("No job configurations found."))
       }
 
+      fetchedConfigs.foreach { configTry =>
+        configTry match {
+          case TrySuccess(jobConfig) =>
+            logger.info(s"Successfully loaded configuration for job: ${jobConfig.jobName} (ID: ${jobConfig.jobId})")
+            // --- Start of Single Job Execution Logic ---
+            var jobSummary: Option[ReconciliationJobSummary] = Some(ReconciliationJobSummary(
+              jobId = jobConfig.jobId,
+              jobName = jobConfig.jobName,
+              overallStatus = Success, // Initial status for this specific job
+              startTime = Instant.now().toEpochMilli // Start time for this specific job
+            ))
+            val singleJobErrorMessages = ListBuffer[String]() // Errors specific to this job run
+
+            try {
+                logger.info(s"Executing reconciliation for job: ${jobConfig.jobName}")
+                // ... (Keep the existing reconciliation logic here, from sourceReader down to email sending) ...
+                // Replace 'appStartTime' with 'jobSummary.get.startTime' if needed for duration calcs within this job.
+
+                val sourceReader = DataSourceReaderFactory.getReader(jobConfig.sourceConfig)
+                val targetReader = DataSourceReaderFactory.getReader(jobConfig.targetConfig)
+
+                logger.info(s"[${jobConfig.jobName}] Loading source DataFrame...")
+                val sourceDf = sourceReader.read(jobConfig.sourceConfig)
+                logger.info(s"[${jobConfig.jobName}] Source DataFrame loaded.")
+
+                logger.info(s"[${jobConfig.jobName}] Loading target DataFrame...")
+                val targetDf = targetReader.read(jobConfig.targetConfig)
+                logger.info(s"[${jobConfig.jobName}] Target DataFrame loaded.")
+
+                val reconService = new ReconciliationService()
+                var currentOverallStatus: ReconStatus = Success
+
+                var finalRowCountResult: Option[RowCountReconResult] = None
+                if (jobConfig.performRowCountCheck) {
+                  logger.info(s"[${jobConfig.jobName}] --- Performing Row Count Check ---")
+                  val rowCountResult = reconService.compareRowCounts(sourceDf, targetDf, jobConfig)
+                  logger.info(s"[${jobConfig.jobName}] Row Count Result: ${rowCountResult.status} - ${rowCountResult.summaryMessage}")
+                  if (rowCountResult.status == Failure) currentOverallStatus = Failure
+                  finalRowCountResult = Some(rowCountResult)
+                }
+
+                var finalSchemaReconResult: Option[SchemaReconResult] = None
+                if (jobConfig.performSchemaCheck) {
+                  logger.info(s"[${jobConfig.jobName}] --- Performing Schema Check ---")
+                  val schemaReconResult = reconService.compareSchemas(sourceDf, targetDf, jobConfig)
+                  logger.info(s"[${jobConfig.jobName}] Schema Recon Result: ${schemaReconResult.status} - ${schemaReconResult.summaryMessage}")
+                  schemaReconResult.fieldComparisons.filter(!_.isMatch).foreach { comp =>
+                    logger.info(s"  [${jobConfig.jobName}] MISMATCH: Field: ${comp.fieldName}, Source: ${comp.sourceDataType.getOrElse("N/A")}, Target: ${comp.targetDataType.getOrElse("N/A")}, Remarks: ${comp.remarks.getOrElse("")}")
+                  }
+                  if (schemaReconResult.status == Failure) currentOverallStatus = Failure
+                  finalSchemaReconResult = Some(schemaReconResult)
+                }
+
+                var finalDataMatchingResult: Option[DataMatchingResult] = None
+                var finalValueComparisonResult: Option[ValueComparisonResult] = None
+                var sourceOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+                var targetOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+                var mismatchesDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
+
+                if (jobConfig.performDataReconciliation) {
+                  logger.info(s"[${jobConfig.jobName}] --- Performing Data Matching (Key-based) ---")
+                  val dataMatchingResult = reconService.performDataMatching(sourceDf, targetDf, jobConfig)
+                  finalDataMatchingResult = Some(dataMatchingResult)
+                  sourceOnlyDfForOutput = Some(dataMatchingResult.sourceOnlyRecordsDf)
+                  targetOnlyDfForOutput = Some(dataMatchingResult.targetOnlyRecordsDf)
+                  logger.info(s"[${jobConfig.jobName}] ${dataMatchingResult.summaryMessage}")
+                  if (dataMatchingResult.status == Failure) currentOverallStatus = Failure
+
+                  if (dataMatchingResult.matchedKeyCount > 0) {
+                    logger.info(s"[${jobConfig.jobName}] --- Performing Column Value Comparison ---")
+                    val valueCompResult = reconService.compareColumnValues(dataMatchingResult.matchedRecordsDf, jobConfig)
+                    finalValueComparisonResult = Some(valueCompResult)
+                    mismatchesDfForOutput = Some(valueCompResult.mismatchedRecordsDf)
+                    logger.info(s"[${jobConfig.jobName}] ${valueCompResult.summaryMessage}")
+                    if (valueCompResult.status == Failure) currentOverallStatus = Failure
+                  } else {
+                    logger.info(s"[${jobConfig.jobName}] No matched keys found, skipping column value comparison.")
+                  }
+                }
+
+                var finalBusinessRuleResults: Option[Seq[BusinessRuleResult]] = None
+                jobConfig.businessRules.filter(_.nonEmpty).foreach { rules =>
+                  logger.info(s"[${jobConfig.jobName}] --- Executing Business Rules ---")
+                  val bizRuleResults = reconService.executeBusinessRules(rules)
+                  finalBusinessRuleResults = Some(bizRuleResults)
+                  bizRuleResults.foreach { brr =>
+                    logger.info(s"[${jobConfig.jobName}] Rule: ${brr.ruleName}, Status: ${brr.status}, Expected: ${brr.expectedResult.getOrElse("N/A")}, Actual: ${brr.actualResult.getOrElse("N/A")}, Remarks: ${brr.remarks.getOrElse("")}")
+                    if (brr.status == Failure) currentOverallStatus = Failure
+                  }
+                }
+
+                val jobEndTime = Instant.now().toEpochMilli
+                val currentJobSummary = jobSummary.get.copy( // Get is safe here due to initialization
+                    rowCountResult = finalRowCountResult,
+                    schemaReconResult = finalSchemaReconResult,
+                    dataMatchingResult = finalDataMatchingResult,
+                    valueComparisonResult = finalValueComparisonResult,
+                    businessRuleResults = finalBusinessRuleResults,
+                    overallStatus = currentOverallStatus,
+                    endTime = Some(jobEndTime),
+                    errorMessages = singleJobErrorMessages.toSeq // Use errors from this specific job
+                )
+                jobSummary = Some(currentJobSummary) // Update the jobSummary for this iteration
+
+                logger.info(s"\n--- Overall Job Status for ${jobConfig.jobName}: ${currentJobSummary.overallStatus} ---")
+
+                val outputService = new OutputService()
+                jobConfig.hdfsOutput.foreach { hdfsConf =>
+                  outputService.saveToHdfs(currentJobSummary, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hdfsConf)
+                }
+                jobConfig.hiveOutput.foreach { hiveConf =>
+                  outputService.saveToHive(currentJobSummary, jobConfig, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hiveConf)
+                }
+                jobConfig.emailNotifications.filter(_.enabled).foreach { emailConf =>
+                  val emailService = new EmailService()
+                  emailService.sendReconReport(currentJobSummary, emailConf) match {
+                    case scala.util.Success(_) => logger.info(s"[${jobConfig.jobName}] Email report dispatch initiated.")
+                    case scala.util.Failure(e) =>
+                      logger.error(s"[${jobConfig.jobName}] Failed to send email report: ${e.getMessage}", e)
+                      // Optionally add this error to singleJobErrorMessages if it should be in the persisted summary
+                  }
+                }
+                if (currentJobSummary.overallStatus == Failure) {
+                    overallApplicationStatus = TryFailure(new RuntimeException(s"Job ${jobConfig.jobName} failed."))
+                }
+
+            } catch {
+                case e: Exception =>
+                    val jobSpecificFatalError = s"FATAL ERROR during reconciliation for job ${jobConfig.jobName} (ID: ${jobConfig.jobId}): ${e.getMessage}"
+                    logger.error(jobSpecificFatalError, e)
+                    singleJobErrorMessages += jobSpecificFatalError
+                    jobSummary = jobSummary.map(_.copy( // jobSummary here is Option, map is safer
+                        overallStatus = Failure,
+                        errorMessages = singleJobErrorMessages.toSeq ++ Seq(s"Exception: ${e.toString}"),
+                        endTime = Some(Instant.now().toEpochMilli)
+                    ))
+                    overallApplicationStatus = TryFailure(e) // Mark that at least one job had a fatal error
+            }
+            // --- End of Single Job Execution Logic ---
+
+          case TryFailure(ex) =>
+            logger.error(s"Failed to load or parse a job configuration: ${ex.getMessage}", ex)
+            overallApplicationStatus = TryFailure(ex) // Mark that config parsing failed
+        }
+      }
     } catch {
-      case e: Exception =>
-        val fatalErrorMsg = s"FATAL ERROR during reconciliation process for job $jobIdArg: ${e.getMessage}"
-        logger.error(fatalErrorMsg, e) // Pass exception for stack trace logging
-        // e.printStackTrace() // Handled by logger
-        errorMessages += fatalErrorMsg
-        jobSummary = jobSummary.map(_.copy(
-            overallStatus = Failure,
-            errorMessages = errorMessages.toSeq ++ Seq(s"Exception: ${e.toString}"),
-            endTime = Some(Instant.now().toEpochMilli)
-          )).orElse(Some(ReconciliationJobSummary( // If jobSummary was None (e.g. error before config loaded)
-            jobId = jobIdArg,
-            jobName = jobSummary.map(_.jobName).getOrElse("Unknown (Exception Occurred)"),
-            overallStatus = Failure,
-            startTime = appStartTime,
-            endTime = Some(Instant.now().toEpochMilli),
-            errorMessages = errorMessages.toSeq ++ Seq(s"Exception: ${e.toString}")
-          )))
-        // System.exit(1)
+      case e: Exception => // Catch exceptions during fetching all configs (e.g., DB down)
+        logger.error(s"FATAL ERROR during initial configuration fetching or main processing loop: ${e.getMessage}", e)
+        overallApplicationStatus = TryFailure(e)
     } finally {
-      val appEndTime = Instant.now().toEpochMilli
-      val duration = appEndTime - appStartTime
-
-      // Update endTime if not already set (e.g. if error happened before summary was fully populated)
-      jobSummary = jobSummary.map(s => if(s.endTime.isEmpty) s.copy(endTime = Some(appEndTime)) else s)
-
-      logger.info(s"Reconciliation Job $jobIdArg finished in $duration ms.")
-      jobSummary.foreach { summary =>
-        logger.info("\n--- Final Reconciliation Job Summary ---")
-        logger.info(s"Job ID: ${summary.jobId}")
-        logger.info(s"Job Name: ${summary.jobName}")
-        logger.info(s"Overall Status: ${summary.overallStatus}")
-        logger.info(s"Start Time: ${summary.startTime}")
-        logger.info(s"End Time: ${summary.endTime.getOrElse("N/A")}")
-        summary.rowCountResult.foreach { rcr =>
-          logger.info(s"Row Count Check: ${rcr.status} - ${rcr.summaryMessage}")
-        }
-        summary.schemaReconResult.foreach { sr =>
-          logger.info(s"Schema Check: ${sr.status} - ${sr.summaryMessage}")
-          // Optionally log mismatch details again here if desired at DEBUG level
-        }
-        if (summary.errorMessages.nonEmpty) {
-          logger.info("Errors:")
-          summary.errorMessages.foreach(e => logger.error(s"  - $e")) // Log errors with error level
-        }
-      }
-      // OutputService handles saving summary via saveToHive
+      val appEndTimeTotal = Instant.now().toEpochMilli
+      val totalDuration = appEndTimeTotal - appStartTime
+      logger.info(s"All reconciliation processing finished in $totalDuration ms.")
 
       spark.stop()
       logger.info("Spark session stopped.")
 
-      // Exit with non-zero status if the job failed
-      if (jobSummary.exists(_.overallStatus == Failure)) {
+      if (overallApplicationStatus.isFailure) {
+        logger.error("Application finished with errors (either config parsing or one or more jobs failed).")
         System.exit(1)
+      } else {
+        logger.info("Application finished successfully.")
       }
     }
   }

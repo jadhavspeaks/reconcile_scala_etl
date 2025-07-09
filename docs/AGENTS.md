@@ -5,7 +5,7 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 ### 1. Core Design Principles:
 
 *   **Modularity:** The framework is organized into distinct Scala packages and classes/objects (e.g., `services`, `readers`, `models`, `config`). Strive to maintain this separation of concerns. New functionalities should fit logically into existing structures or warrant new ones.
-*   **Configuration Driven:** Reconciliation jobs are defined by configurations fetched from an API. These configurations are mapped to Scala case classes (see `ReconciliationConfig.scala`). Avoid hardcoding job-specific logic. Enhancements should generally be controllable via these configurations.
+*   **Configuration Driven:** Reconciliation jobs are defined by configurations fetched directly from a database via JDBC. These configurations are mapped to Scala case classes (see `ReconciliationConfig.scala`). Avoid hardcoding job-specific logic. Enhancements should generally be controllable via these configurations.
 *   **Spark Native & DataFrame API:** Prioritize Spark's DataFrame and Dataset APIs for data manipulation to leverage Spark's optimization and distributed processing capabilities. Use Spark SQL where appropriate.
 *   **Immutability:** Embrace immutability, a core tenet of Scala and functional programming. Case classes should be immutable. DataFrame transformations should produce new DataFrames rather than modifying existing ones in place.
 *   **Type Safety:** Leverage Scala's strong type system to catch errors at compile time. Use `Option` for optional values, and `Try` or `Either` for operations that can fail.
@@ -13,10 +13,10 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 
 ### 2. Working with Key Modules/Packages:
 
-*   **`com.example.reconciler.Main`**: The entry point of the Spark application. It orchestrates fetching configuration, setting up Spark, calling services, and handling top-level errors.
+*   **`com.example.reconciler.Main`**: The entry point of the Spark application. It orchestrates fetching job configurations via JDBC (potentially multiple), iterating through them, setting up Spark, calling services for each job, and handling top-level errors.
 *   **`com.example.reconciler.config`**:
     *   Contains Scala case classes (`ReconciliationJobConfig`, `DataSourceConfig`, `HiveOutputConfig`, etc.) that define the structure of the job configuration.
-    *   `OracleConfigFetcher`: Responsible for fetching the job configuration JSON from an API and deserializing it into the Scala case classes.
+    *   `JdbcConfigFetcher`: Responsible for fetching job configurations from a database via JDBC and mapping `ResultSet` data (including parsing JSON strings for complex parts) to the Scala case classes.
 *   **`com.example.reconciler.readers`**:
     *   `DataSourceReader`: A trait defining the contract for reading data.
     *   `FileDataSourceReader`, `HiveDataSourceReader`: Implementations for different source types.
@@ -30,11 +30,20 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 
 ### 3. Configuration:
 
-*   Job configurations are fetched as JSON from an API specified at runtime. This JSON must map to the structure of `ReconciliationJobConfig` and its nested case classes.
-*   Refer to `ReconciliationConfig.scala` for the canonical structure of configuration objects.
-*   **API Authentication**: The `OracleConfigFetcher` expects an API key via the `RECON_API_KEY` environment variable.
-*   Key configuration items to be aware of for new features:
-    *   `ReconciliationJobConfig.hiveOutput.detailTableName` for enabling the detailed events log.
+*   Job configurations are fetched from a database via JDBC. The `JdbcConfigFetcher` uses a configurable SQL query (from `RECON_JOBS_SQL_QUERY` env var) to retrieve rows.
+*   Each row is mapped to a `ReconciliationJobConfig` Scala case class.
+    *   Simple fields are mapped directly from ResultSet columns.
+    *   Complex nested objects (like `sourceConfig`, `targetConfig`) and sequences (like `columnsToCompare`, `businessRules`) are expected to be stored as **JSON strings** in dedicated columns within the ResultSet. `JdbcConfigFetcher` then parses these JSON strings.
+*   Refer to `ReconciliationConfig.scala` for the canonical structure of `ReconciliationJobConfig` and its nested case classes.
+*   **JDBC Connection Details**: These are provided via environment variables:
+    *   `RECON_JOBS_JDBC_URL`
+    *   `RECON_JOBS_JDBC_USER`
+    *   `RECON_JOBS_JDBC_PASSWORD`
+    *   `RECON_JOBS_JDBC_DRIVER` (defaults to Oracle)
+    *   `RECON_JOBS_SQL_QUERY`
+*   **Iterative Processing**: If the `RECON_JOBS_SQL_QUERY` returns multiple rows, `Main.scala` will iterate through each, processing it as an independent reconciliation job.
+*   Key configuration items within `ReconciliationJobConfig` (relevant to recent features):
+    *   `hiveOutput.detailTableName`: Optional. Enables logging to the detailed events table.
     *   Options within `DataSourceConfig` for new source types or parameters.
 
 ### 4. Testing (`src/test/scala/`):
@@ -83,7 +92,7 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
     *   Be mindful of Hive table schemas when writing DataFrames.
     *   Use appropriate `SaveMode` (e.g., `Append`, `Overwrite`).
 *   **Logging:** Use the SLF4J loggers provided or instantiated within classes. Log important events, decisions, errors, and key data points (like counts) to aid diagnostics.
-*   **Configuration API Changes**: If `ReconciliationJobConfig` structure changes, ensure `OracleConfigFetcher` (and the API providing the JSON) are updated accordingly.
+*   **Configuration Data Source Changes**: If the structure of `ReconciliationJobConfig` changes, or if the way data is stored in the configuration database (e.g., column names for JSON strings, or structure of those JSONs) changes, ensure `JdbcConfigFetcher`'s mapping logic is updated accordingly.
 
 ### 9. Workflow for Making Changes:
 

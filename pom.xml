@@ -136,6 +136,13 @@
         </dependency>
         -->
 
+        <!-- Oracle JDBC Driver -->
+        <dependency>
+            <groupId>com.oracle.database.jdbc</groupId>
+            <artifactId>ojdbc8</artifactId>
+            <version>19.3.0.0</version> <!-- Ensure this version is compatible with your Oracle DB -->
+        </dependency>
+
     </dependencies>
 
     <repositories> <!-- Added repositories which might have been missing -->

@@ -24,7 +24,7 @@ The framework identifies discrepancies by performing row count checks, schema co
     *   Optionally saves raw mismatch, source-only, and target-only DataFrames to HDFS.
     *   Generates HTML email notifications with status-colored headers (Green for Success, Red for Failure, Orange for Partial Success) and detailed summaries.
 *   **Configurable Logging**: Utilizes SLF4J with Logback for flexible and configurable logging.
-*   **Dynamic Configuration**: Fetches job configurations from a central API.
+*   **Dynamic Configuration**: Fetches job configurations directly from a database via JDBC.
 
 ## Project Structure
 
@@ -64,8 +64,8 @@ data-reconciliation-framework/
 *   **Hadoop HDFS**: Required if using HDFS for input or output.
 *   **Hive Metastore**: Required if reading from or writing to Hive tables.
 *   **SMTP Server**: For sending email notifications.
-*   **Configuration API**: An accessible API endpoint from which job configurations can be fetched.
-*   **`RECON_API_KEY` Environment Variable**: For authenticating with the configuration API.
+*   **JDBC Accessible Database**: An Oracle database (or other, with appropriate JDBC driver and SQL query) containing the job configurations.
+*   **Environment Variables for JDBC Configuration**: See "Configuration" section below for required variables like `RECON_JOBS_JDBC_URL`, `RECON_JOBS_SQL_QUERY`, etc.
 
 ## Building the Project
 
@@ -87,9 +87,34 @@ data-reconciliation-framework/
 
 ## Configuration
 
-Reconciliation job configurations are fetched dynamically from an API endpoint at runtime. The application expects the API to return a JSON payload that maps to the Scala case classes defined in `src/main/scala/com/example/reconciler/config/ReconciliationConfig.scala`.
+Reconciliation job configurations are fetched directly from a database via JDBC at runtime. The application queries the database using a configurable SQL query and expects the ResultSet to provide the parameters for one or more jobs. Each row from the ResultSet is mapped to the Scala case classes defined in `src/main/scala/com/example/reconciler/config/ReconciliationConfig.scala`.
 
-### Key Configuration Parameters (Scala Case Classes):
+If the query returns multiple rows, each row is treated as a separate reconciliation job and processed iteratively.
+
+### JDBC Configuration Environment Variables:
+The following environment variables must be set to enable JDBC configuration fetching:
+
+*   `RECON_JOBS_JDBC_URL`: The JDBC URL for connecting to the database (e.g., `jdbc:oracle:thin:@//hostname:port/service_name`).
+*   `RECON_JOBS_JDBC_USER`: Database username.
+*   `RECON_JOBS_JDBC_PASSWORD`: Database password.
+*   `RECON_JOBS_JDBC_DRIVER`: The fully qualified JDBC driver class name (e.g., `oracle.jdbc.driver.OracleDriver`). Defaults to Oracle if not set.
+*   `RECON_JOBS_SQL_QUERY`: The SQL query to execute to fetch job configurations. This query should return all necessary columns to populate `ReconciliationJobConfig`.
+
+### Database ResultSet Structure for Configuration:
+The `RECON_JOBS_SQL_QUERY` is expected to return rows where:
+*   Most fields of `ReconciliationJobConfig` are mapped directly from columns in the ResultSet (e.g., a column `job_id` maps to `ReconciliationJobConfig.jobId`).
+*   **Complex/Nested Structures as JSON Strings**: For more complex parts of the configuration (nested objects or sequences of objects), the corresponding column in the ResultSet is expected to contain a **JSON string**. This JSON string is then parsed into the appropriate Scala case class structure. Assumed column names for these JSON parts (these are configurable within `JdbcConfigFetcher.scala` but good defaults are provided):
+    *   `source_config_json`: JSON object for `DataSourceConfig` (source).
+    *   `target_config_json`: JSON object for `DataSourceConfig` (target).
+    *   `pk_columns_json`: JSON array of strings for `primaryKeyColumns`.
+    *   `columns_to_compare_json`: JSON array of `ReconColumnConfig` objects.
+    *   `business_rules_json`: Optional JSON array of `BusinessRuleConfig` objects.
+    *   `hdfs_output_json`: Optional JSON object for `HdfsOutputConfig`.
+    *   `hive_output_json`: Optional JSON object for `HiveOutputConfig`.
+    *   `email_notifications_json`: Optional JSON object for `EmailConfig`.
+    Refer to `JdbcConfigFetcher.scala` for the constant definitions of these expected column names (e.g., `JdbcConfigFetcher.SOURCE_CONFIG_JSON_COL`).
+
+### Key Configuration Parameters (Scala Case Classes - `ReconciliationJobConfig`):
 
 *   **`ReconciliationJobConfig`**: The root configuration object for a job.
     *   `jobId`: Unique identifier for the job.
@@ -107,35 +132,37 @@ Reconciliation job configurations are fetched dynamically from an API endpoint a
         *   `mismatchTableName`: Name for the raw value mismatches table (may be deprecated in favor of `detailTableName`).
         *   `detailTableName`: Optional. Name for the table storing detailed event logs (e.g., `recon_details`). If provided, detailed logs are written.
     *   `emailNotifications` (`EmailConfig`): Configuration for email alerts.
-*   **API Authentication**: The application expects an API key to be provided via the `RECON_API_KEY` environment variable for authenticating with the configuration API.
 
-### Example `spark-submit` Command-Line Arguments:
-The application accepts the following command-line arguments:
-1.  `jobId` (String, mandatory): The ID of the reconciliation job to run. This ID is used to fetch the configuration from the API.
-2.  `apiBaseUrl` (String, optional): The base URL for the configuration API. If not provided, it checks Spark configuration `spark.reconciler.apiBaseUrl`, then defaults to a placeholder (which will show a warning).
+### Command-Line Argument:
+The application accepts one optional command-line argument:
+1.  `jobNameFilter` (String, optional): If provided, the `RECON_JOBS_SQL_QUERY` will be appended with `WHERE job_name = ?` (or `AND job_name = ?` if a WHERE clause already exists) to filter for a specific job configuration by its name. If not provided, all configurations returned by `RECON_JOBS_SQL_QUERY` will be processed.
 
 ## Running the Application
 
-Submit the packaged JAR to Spark using `spark-submit`.
+Ensure the required JDBC environment variables (listed in the "Configuration" section) are set before running the application.
+
+Submit the packaged JAR to Spark using `spark-submit`:
 
 ```bash
 # Example:
-export RECON_API_KEY="your_actual_api_key" # Set the API key environment variable
+export RECON_JOBS_JDBC_URL="your_jdbc_url"
+export RECON_JOBS_JDBC_USER="your_db_user"
+export RECON_JOBS_JDBC_PASSWORD="your_db_password"
+export RECON_JOBS_SQL_QUERY="SELECT * FROM your_job_configurations_table"
+# Optionally, set RECON_JOBS_JDBC_DRIVER if not using Oracle default
 
 spark-submit \
   --class com.example.reconciler.Main \
   --master <your_spark_master> \ # e.g., yarn, local[*]
   --deploy-mode <client_or_cluster> \
-  --name "Recon_Job_${JOB_ID}" \
+  --name "Recon_Job_Runner" \ # General name, or make it dynamic if submitting one job at a time via filter
   target/data-reconciliation-framework-1.0-SNAPSHOT.jar \
-  ${JOB_ID} \ # First argument: Job ID
-  http://your-config-api-host/api/configs # Second argument (optional): API Base URL
+  [optional_job_name_to_filter_by] # Optional: specific job name to run
 ```
 
 *   Replace `<your_spark_master>` and `<client_or_cluster>` with your Spark environment specifics.
-*   The JAR name in `target/` might vary based on Maven configuration.
-*   `${JOB_ID}` should be the specific job ID you want to run.
-*   Provide the actual configuration API base URL if it's not set via Spark config.
+*   The JAR name in `target/` might vary.
+*   If `[optional_job_name_to_filter_by]` is provided, only that job configuration will be fetched and run (assuming your `RECON_JOBS_SQL_QUERY` can be filtered by `job_name`). If omitted, all jobs returned by the base query are processed.
 
 ## Logging
 
@@ -175,8 +202,8 @@ If configured in `ReconciliationJobConfig.emailNotifications`:
 
 ## Key Modules/Packages (Scala)
 
-*   **`com.example.reconciler.Main`**: Main entry point for the Spark application. Orchestrates configuration loading, reconciliation execution, and output generation.
-*   **`com.example.reconciler.config`**: Contains Scala case classes for configuration (`ReconciliationJobConfig`, `DataSourceConfig`, etc.) and `OracleConfigFetcher` for retrieving configurations from an API.
+*   **`com.example.reconciler.Main`**: Main entry point for the Spark application. Orchestrates fetching job configurations via JDBC, iterating through them, and managing the reconciliation lifecycle for each.
+*   **`com.example.reconciler.config`**: Contains Scala case classes for configuration (`ReconciliationJobConfig`, `DataSourceConfig`, etc.) and `JdbcConfigFetcher` for retrieving configurations from a database via JDBC.
 *   **`com.example.reconciler.models`**: Defines data models (case classes like `ReconciliationJobSummary`, `ReconStatus`, `RowCountReconResult`) used to represent reconciliation states and results.
 *   **`com.example.reconciler.readers`**: Includes `DataSourceReader` trait, implementations (`FileDataSourceReader`, `HiveDataSourceReader`), and `DataSourceReaderFactory` for reading data from various sources.
 *   **`com.example.reconciler.services`**:
