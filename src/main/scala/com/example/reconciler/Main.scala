@@ -82,8 +82,18 @@ object Main {
                 val targetReader = DataSourceReaderFactory.getReader(jobConfig.targetConfig)
 
                 logger.info(s"[${jobConfig.jobName}] Loading source DataFrame...")
-                val sourceDf = sourceReader.read(jobConfig.sourceConfig)
+                val originalSourceDf = sourceReader.read(jobConfig.sourceConfig)
                 logger.info(s"[${jobConfig.jobName}] Source DataFrame loaded.")
+
+                // Apply column mapping to sourceDf
+                val sourceDf = jobConfig.columnNameMapping match {
+                  case Some(mapping) if mapping.nonEmpty =>
+                    logger.info(s"[${jobConfig.jobName}] Applying column mapping to source DataFrame.")
+                    com.example.reconciler.util.DataFrameTransformer.applyColumnMapping(originalSourceDf, mapping)
+                  case _ =>
+                    logger.info(s"[${jobConfig.jobName}] No column mapping defined or mapping is empty. Using source DataFrame as is.")
+                    originalSourceDf
+                }
 
                 logger.info(s"[${jobConfig.jobName}] Loading target DataFrame...")
                 val targetDf = targetReader.read(jobConfig.targetConfig)
@@ -93,8 +103,9 @@ object Main {
                 var currentOverallStatus: ReconStatus = Success
 
                 var finalRowCountResult: Option[RowCountReconResult] = None
-                if (jobConfig.performRowCountCheck) {
+                if (jobConfig.performRowCountCheck) { // This flag can remain for a general row count check
                   logger.info(s"[${jobConfig.jobName}] --- Performing Row Count Check ---")
+                  // Row count is done on DFs before potential data type changes or detailed filtering in sourceToTargetFlag block
                   val rowCountResult = reconService.compareRowCounts(sourceDf, targetDf, jobConfig)
                   logger.info(s"[${jobConfig.jobName}] Row Count Result: ${rowCountResult.status} - ${rowCountResult.summaryMessage}")
                   if (rowCountResult.status == Failure) currentOverallStatus = Failure
@@ -102,25 +113,28 @@ object Main {
                 }
 
                 var finalSchemaReconResult: Option[SchemaReconResult] = None
-                if (jobConfig.performSchemaCheck) {
-                  logger.info(s"[${jobConfig.jobName}] --- Performing Schema Check ---")
-                  val schemaReconResult = reconService.compareSchemas(sourceDf, targetDf, jobConfig)
-                  logger.info(s"[${jobConfig.jobName}] Schema Recon Result: ${schemaReconResult.status} - ${schemaReconResult.summaryMessage}")
-                  schemaReconResult.fieldComparisons.filter(!_.isMatch).foreach { comp =>
-                    logger.info(s"  [${jobConfig.jobName}] MISMATCH: Field: ${comp.fieldName}, Source: ${comp.sourceDataType.getOrElse("N/A")}, Target: ${comp.targetDataType.getOrElse("N/A")}, Remarks: ${comp.remarks.getOrElse("")}")
-                  }
-                  if (schemaReconResult.status == Failure) currentOverallStatus = Failure
-                  finalSchemaReconResult = Some(schemaReconResult)
-                }
-
                 var finalDataMatchingResult: Option[DataMatchingResult] = None
                 var finalValueComparisonResult: Option[ValueComparisonResult] = None
                 var sourceOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
                 var targetOnlyDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
                 var mismatchesDfForOutput: Option[org.apache.spark.sql.DataFrame] = None
 
-                if (jobConfig.performDataReconciliation) {
+                if (jobConfig.sourceToTargetFlag) {
+                  logger.info(s"[${jobConfig.jobName}] --- Performing Source-to-Target Reconciliation ---")
+                  if (jobConfig.performSchemaCheck) {
+                    logger.info(s"[${jobConfig.jobName}] --- Performing Schema Check ---")
+                    // Schema check uses the (potentially mapped) sourceDf
+                    val schemaReconResult = reconService.compareSchemas(sourceDf, targetDf, jobConfig)
+                    logger.info(s"[${jobConfig.jobName}] Schema Recon Result: ${schemaReconResult.status} - ${schemaReconResult.summaryMessage}")
+                    schemaReconResult.fieldComparisons.filter(!_.isMatch).foreach { comp =>
+                      logger.info(s"  [${jobConfig.jobName}] MISMATCH: Field: ${comp.fieldName}, Source: ${comp.sourceDataType.getOrElse("N/A")}, Target: ${comp.targetDataType.getOrElse("N/A")}, Remarks: ${comp.remarks.getOrElse("")}")
+                    }
+                    if (schemaReconResult.status == Failure) currentOverallStatus = Failure
+                    finalSchemaReconResult = Some(schemaReconResult)
+                  }
+
                   logger.info(s"[${jobConfig.jobName}] --- Performing Data Matching (Key-based) ---")
+                  // Data matching uses the (potentially mapped) sourceDf
                   val dataMatchingResult = reconService.performDataMatching(sourceDf, targetDf, jobConfig)
                   finalDataMatchingResult = Some(dataMatchingResult)
                   sourceOnlyDfForOutput = Some(dataMatchingResult.sourceOnlyRecordsDf)
@@ -130,34 +144,69 @@ object Main {
 
                   if (dataMatchingResult.matchedKeyCount > 0) {
                     logger.info(s"[${jobConfig.jobName}] --- Performing Column Value Comparison ---")
+                    // Value comparison uses the (potentially mapped) sourceDf's columns via matchedRecordsDf
                     val valueCompResult = reconService.compareColumnValues(dataMatchingResult.matchedRecordsDf, jobConfig)
                     finalValueComparisonResult = Some(valueCompResult)
                     mismatchesDfForOutput = Some(valueCompResult.mismatchedRecordsDf)
                     logger.info(s"[${jobConfig.jobName}] ${valueCompResult.summaryMessage}")
                     if (valueCompResult.status == Failure) currentOverallStatus = Failure
                   } else {
-                    logger.info(s"[${jobConfig.jobName}] No matched keys found, skipping column value comparison.")
+                    logger.info(s"[${jobConfig.jobName}] No matched keys found for Source-To-Target, skipping column value comparison.")
                   }
+                } else {
+                  logger.info(s"[${jobConfig.jobName}] Source-to-Target reconciliation skipped as per sourceToTargetFlag=false.")
                 }
 
-                var finalBusinessRuleResults: Option[Seq[BusinessRuleResult]] = None
-                jobConfig.businessRules.filter(_.nonEmpty).foreach { rules =>
-                  logger.info(s"[${jobConfig.jobName}] --- Executing Business Rules ---")
-                  val bizRuleResults = reconService.executeBusinessRules(rules)
-                  finalBusinessRuleResults = Some(bizRuleResults)
-                  bizRuleResults.foreach { brr =>
-                    logger.info(s"[${jobConfig.jobName}] Rule: ${brr.ruleName}, Status: ${brr.status}, Expected: ${brr.expectedResult.getOrElse("N/A")}, Actual: ${brr.actualResult.getOrElse("N/A")}, Remarks: ${brr.remarks.getOrElse("")}")
-                    if (brr.status == Failure) currentOverallStatus = Failure
-                  }
+                // Legacy Business Rule Check (vs literal)
+                var finalLegacyBusinessRuleResults: Option[Seq[BusinessRuleResult]] = None
+                if (jobConfig.checkBusinessTransformation) { // This is the flag for the legacy rule
+                    jobConfig.businessRules.filter(_.nonEmpty).foreach{ rules =>
+                        // Filter for rules that are 'legacy' (have expectedResult or no target join keys)
+                        val legacyRules = rules.filter(r => r.expectedResult.isDefined || r.joinKeysForTargetComparison.isEmpty)
+                        if (legacyRules.nonEmpty) {
+                            logger.info(s"[${jobConfig.jobName}] --- Executing Legacy Business Rules (vs literal) ---")
+                            val bizRuleResults = reconService.executeBusinessRules(legacyRules) // Pass only legacy rules
+                            finalLegacyBusinessRuleResults = Some(bizRuleResults)
+                            bizRuleResults.foreach { brr =>
+                                logger.info(s"[${jobConfig.jobName}] Legacy Rule: ${brr.ruleName}, Status: ${brr.status}, Expected: ${brr.expectedResult.getOrElse("N/A")}, Actual: ${brr.actualResult.getOrElse("N/A")}, Remarks: ${brr.remarks.getOrElse("")}")
+                                if (brr.status == Failure) currentOverallStatus = Failure
+                            }
+                        }
+                    }
                 }
+
+                // New Business Rule Comparison (SQL result vs Target)
+                var finalBusinessRuleComparisonResult: Option[ValueComparisonResult] = None
+                if (jobConfig.businessRuleComparisonFlag) {
+                    jobConfig.businessRules.filter(_.nonEmpty).foreach { rules =>
+                        // Filter for rules that are for new comparison mode (have target join keys)
+                        val comparisonRules = rules.filter(r => r.joinKeysForTargetComparison.isDefined && r.joinKeysForTargetComparison.get.nonEmpty)
+                        if (comparisonRules.nonEmpty) {
+                             logger.info(s"[${jobConfig.jobName}] --- Executing Business Rule Comparison (SQL vs Target) ---")
+                             // Assuming one such rule based on previous clarifications, taking the first.
+                             comparisonRules.headOption.foreach { ruleToCompare =>
+                                val brCompResult = reconService.executeAndCompareBusinessRule(ruleToCompare, targetDf, jobConfig)
+                                finalBusinessRuleComparisonResult = brCompResult
+                                brCompResult.foreach { res =>
+                                    logger.info(s"[${jobConfig.jobName}] Business Rule Comparison ('${ruleToCompare.ruleName}' vs Target) Result: ${res.status} - ${res.summaryMessage}")
+                                    if (res.status == Failure) currentOverallStatus = Failure
+                                }
+                             }
+                        } else {
+                            logger.info(s"[${jobConfig.jobName}] businessRuleComparisonFlag is true, but no suitable business rules with joinKeysForTargetComparison found.")
+                        }
+                    }
+                }
+
 
                 val jobEndTime = Instant.now().toEpochMilli
-                val currentJobSummary = jobSummary.get.copy( // Get is safe here due to initialization
+                val currentJobSummary = jobSummary.get.copy(
                     rowCountResult = finalRowCountResult,
-                    schemaReconResult = finalSchemaReconResult,
-                    dataMatchingResult = finalDataMatchingResult,
-                    valueComparisonResult = finalValueComparisonResult,
-                    businessRuleResults = finalBusinessRuleResults,
+                    schemaReconResult = finalSchemaReconResult, // From sourceToTargetFlag block
+                    dataMatchingResult = finalDataMatchingResult, // From sourceToTargetFlag block
+                    valueComparisonResult = finalValueComparisonResult, // From sourceToTargetFlag block
+                    businessRuleResults = finalLegacyBusinessRuleResults, // Legacy rules
+                    businessRuleComparisonResult = finalBusinessRuleComparisonResult, // New rule comparison result
                     overallStatus = currentOverallStatus,
                     endTime = Some(jobEndTime),
                     errorMessages = singleJobErrorMessages.toSeq // Use errors from this specific job

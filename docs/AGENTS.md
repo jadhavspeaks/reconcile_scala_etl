@@ -15,8 +15,13 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 
 *   **`com.example.reconciler.Main`**: The entry point of the Spark application. It orchestrates fetching job configurations via JDBC (potentially multiple), iterating through them, setting up Spark, calling services for each job, and handling top-level errors.
 *   **`com.example.reconciler.config`**:
-    *   Contains Scala case classes (`ReconciliationJobConfig`, `DataSourceConfig`, `HiveOutputConfig`, etc.) that define the structure of the job configuration.
-    *   `JdbcConfigFetcher`: Responsible for fetching job configurations from a database via JDBC. It maps a **fully flattened ResultSet (string columns)** to the Scala case classes, including custom parsing for comma-separated lists and conditional logic for business rules based on a `checkBusinessTransformation` flag.
+    *   Contains Scala case classes (`ReconciliationJobConfig`, `BusinessRuleConfig`, `DataSourceConfig`, etc.).
+    *   `JdbcConfigFetcher`: Fetches configurations from a database. It expects a **fully flattened ResultSet** where all parameters are string columns. It performs:
+        *   Direct string-to-type conversions.
+        *   Manual construction of nested objects (e.g., `DataSourceConfig`, `EmailConfig`).
+        *   Parsing of comma-separated strings for sequences (e.g., `primaryKeyColumns`, `columnsToCompare` names, `emailRecipients`).
+        *   Derivation of `columnNameMapping: Map[String, String]` from two dedicated comma-separated string columns (`source_mapping_columns_str`, `target_mapping_columns_str`).
+        *   Conditional logic for business rules based on `checkBusinessTransformation` (legacy rule vs. literal) and `businessRuleComparisonFlag` (new rule: SQL output vs. target table, using `joinKeysForTargetComparison`).
 *   **`com.example.reconciler.readers`**:
     *   `DataSourceReader`: A trait defining the contract for reading data.
     *   `FileDataSourceReader`, `HiveDataSourceReader`: Implementations for different source types.
@@ -31,14 +36,19 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 ### 3. Configuration:
 
 *   Job configurations are fetched from a database via JDBC. The `JdbcConfigFetcher` uses a configurable SQL query (from `RECON_JOBS_SQL_QUERY` env var) to retrieve rows.
-*   Each row from the ResultSet is mapped to a `ReconciliationJobConfig` Scala case class. The ResultSet is expected to have a **fully flattened structure**, where all configuration parameters, including those for nested objects and sequences, are represented as individual string columns.
-    *   **Direct Mapping**: Simple fields are read as strings and converted to their target types (Boolean, Int, Double, etc.).
-    *   **Nested Object Construction**: Objects like `DataSourceConfig`, `HdfsOutputConfig`, etc., are manually constructed by reading their constituent fields from multiple dedicated string columns (e.g., `source_type`, `source_file_path`, `source_file_format` for a source file).
-    *   **Sequence Parsing**:
-        *   `primaryKeyColumns` and `columnsToCompare` (names only) are parsed from single, comma-separated string columns (e.g., `pk_columns_str`, `compare_column_names_str`). `ReconColumnConfig` objects for `columnsToCompare` are created with default attributes.
-        *   `emailNotifications.recipients` are parsed from a comma-separated string column.
-    *   **Business Rule Handling**: A `check_business_transformation` string column ("Yes"/"No") controls whether a single business rule is processed. If "Yes", then `business_rule_name`, `business_rule_sql`, and `business_rule_expected_result` string columns are used to create the rule.
-*   Refer to `ReconciliationConfig.scala` for the `ReconciliationJobConfig` structure and `JdbcConfigFetcher.scala` for the expected constant column names from the ResultSet.
+*   Each row from the ResultSet is mapped to a `ReconciliationJobConfig` Scala case class. The ResultSet must provide a **fully flattened structure** with all parameters as individual string columns.
+    *   **Direct Mapping**: Simple fields (e.g., `jobId`, flags like `sourceToTargetFlag`) are read as strings and converted to their target types (Boolean, Int, Double, etc.).
+    *   **Nested Object Construction**: Objects like `DataSourceConfig`, `HdfsOutputConfig`, etc., are manually constructed by `JdbcConfigFetcher` reading their constituent fields from multiple dedicated string columns (e.g., `source_type`, `source_file_path`, `source_file_format` for a source file).
+    *   **Column Name Mapping (`columnNameMapping`)**: This `Option[Map[String, String]]` is derived by `JdbcConfigFetcher` from two specific database columns: one containing a comma-separated list of source column names (e.g., `source_mapping_columns_str`) and another for target column names (e.g., `target_mapping_columns_str`). These lists must correspond positionally.
+    *   **Sequence Parsing (from comma-separated strings)**:
+        *   `primaryKeyColumns` (`Seq[String]`): Parsed from a single string column (e.g., `pk_columns_str`). These should be target column names (or source names if not mapped).
+        *   `columnsToCompare` (`Seq[ReconColumnConfig]`): The names are parsed from a single string column (e.g., `compare_column_names_str`). Each results in a `ReconColumnConfig` with default comparison attributes. Column names should be target names.
+        *   `emailNotifications.recipients` (`Seq[String]`).
+        *   `BusinessRuleConfig.joinKeysForTargetComparison` (`Option[Seq[String]]`).
+    *   **Business Rule Handling (Two Modes)**:
+        *   **Legacy (vs. Literal)**: Controlled by `check_business_transformation` flag (string "Yes"/"No" column). If "Yes", then `business_rule_name`, `business_rule_sql`, and `business_rule_expected_result` string columns define a single `BusinessRuleConfig` for this mode.
+        *   **New (SQL Result vs. Target Table)**: Controlled by `business_rule_comparison_flag` (string "true"/"false" column). If "true", it uses the same `business_rule_name`, `business_rule_sql`. A `business_rule_target_join_keys_str` column (comma-separated target column names) specifies join keys. The main `jobConfig.columnsToCompare` are reused for value checks. The SQL output for this rule is expected to align with source data structure (and will be mapped using `columnNameMapping` if provided).
+*   Refer to `ReconciliationConfig.scala` for the case class structures and `JdbcConfigFetcher.scala` for the expected constant names for database columns.
 *   **JDBC Connection Details**: These are provided via environment variables:
     *   `RECON_JOBS_JDBC_URL`
     *   `RECON_JOBS_JDBC_USER`

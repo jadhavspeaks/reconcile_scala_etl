@@ -51,7 +51,8 @@ case class ReconColumnConfig(
 case class BusinessRuleConfig(
   ruleName: String,
   sqlQuery: String, // Parameterized SQL query
-  expectedResult: Option[String] // Or a more complex structure for expected results
+  expectedResult: Option[String], // NOTE: Not used by the new "SQL result vs Target table" comparison mode. Retained for potential other uses or legacy.
+  joinKeysForTargetComparison: Option[Seq[String]] = None // Column names (after mapping) to join BusinessRule SQL result with Target table
 )
 
 case class HdfsOutputConfig(
@@ -82,20 +83,23 @@ case class ReconciliationJobConfig(
   jobName: String,
   sourceConfig: DataSourceConfig,
   targetConfig: DataSourceConfig,
-  primaryKeyColumns: Seq[String], // Column names used for joining/identifying records
-  columnsToCompare: Seq[ReconColumnConfig], // Detailed config for columns to be compared
+  columnNameMapping: Option[Map[String, String]] = None, // Populated by JdbcConfigFetcher
+  primaryKeyColumns: Seq[String], // Should refer to target column names (or source if no mapping for them)
+  columnsToCompare: Seq[ReconColumnConfig], // Should refer to target column names (or source if no mapping for them)
   businessRules: Option[Seq[BusinessRuleConfig]] = None,
-  performRowCountCheck: Boolean = true,
-  performSchemaCheck: Boolean = true,
-  performDataReconciliation: Boolean = true,
-  checkBusinessTransformation: Boolean = false, // New field, default to false
+  performRowCountCheck: Boolean = true, // General flag
+  performSchemaCheck: Boolean = true,   // General flag
+  // Specific flags for major recon modes
+  sourceToTargetFlag: Boolean = true, // Controls Source-vs-Target data/value reconciliation
+  businessRuleComparisonFlag: Boolean = false, // Controls BusinessRuleSQL-vs-Target reconciliation
+  checkBusinessTransformation: Boolean = false, // Controls if the single business rule (name,sql,expected) is loaded/used
   hdfsOutput: Option[HdfsOutputConfig] = None,
   hiveOutput: Option[HiveOutputConfig] = None,
   emailNotifications: Option[EmailConfig] = None,
   // Advanced options
-  sampleMismatchLimit: Int = 100, // Max number of mismatches to include in detailed report
-  errorTolerancePercentage: Option[Double] = None, // If overall error % is above this, maybe fail the job
-  timeoutSeconds: Option[Int] = Some(60) // Timeout for API calls
+  sampleMismatchLimit: Int = 100,
+  errorTolerancePercentage: Option[Double] = None,
+  timeoutSeconds: Option[Int] = Some(60)
 )
 
 object OracleConfigFetcher { // This object will be replaced by JdbcConfigFetcher logic elsewhere

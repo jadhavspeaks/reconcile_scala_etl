@@ -45,8 +45,9 @@ case class ReconciliationJobSummary(
   rowCountResult: Option[RowCountReconResult] = None,
   schemaReconResult: Option[SchemaReconResult] = None,
   dataMatchingResult: Option[DataMatchingResult] = None,
-  valueComparisonResult: Option[ValueComparisonResult] = None, // For column value comparison results
-  businessRuleResults: Option[Seq[BusinessRuleResult]] = None, // For business rule results
+  valueComparisonResult: Option[ValueComparisonResult] = None, // For column value comparison results (Source vs Target)
+  businessRuleResults: Option[Seq[BusinessRuleResult]] = None, // For legacy business rule results (vs literal)
+  businessRuleComparisonResult: Option[ValueComparisonResult] = None, // For new business rule (SQL result vs Target)
   errorMessages: Seq[String] = Seq.empty
 )
 

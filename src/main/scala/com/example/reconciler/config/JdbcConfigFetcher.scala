@@ -23,8 +23,10 @@ object JdbcConfigFetcher {
   val JOB_NAME_COL = "job_name" // Also used in WHERE clause for filtering
   val PERFORM_ROW_COUNT_CHECK_COL = "perform_row_count_check" // String "true"/"false" or "yes"/"no"
   val PERFORM_SCHEMA_CHECK_COL = "perform_schema_check"       // String "true"/"false" or "yes"/"no"
-  val PERFORM_DATA_RECON_COL = "perform_data_recon"         // String "true"/"false" or "yes"/"no"
-  val CHECK_BUSINESS_TRANSFORMATION_COL = "check_business_transformation" // String "Yes"/"No"
+  // val PERFORM_DATA_RECON_COL = "perform_data_recon" // Replaced by sourceToTargetFlag
+  val SOURCE_TO_TARGET_FLAG_COL = "source_to_target_flag" // String "true"/"false" or "yes"/"no"
+  val BUSINESS_RULE_COMPARISON_FLAG_COL = "business_rule_comparison_flag" // String "true"/"false" or "yes"/"no"
+  val CHECK_BUSINESS_TRANSFORMATION_COL = "check_business_transformation" // String "Yes"/"No" (for single legacy business rule)
   val SAMPLE_MISMATCH_LIMIT_COL = "sample_mismatch_limit"     // String representing an Int
   val ERROR_TOLERANCE_PERCENTAGE_COL = "error_tolerance_percentage" // String representing a Double
   val TIMEOUT_SECONDS_COL = "timeout_seconds"                 // String representing an Int
@@ -52,11 +54,14 @@ object JdbcConfigFetcher {
   // For Sequences (comma-separated strings)
   val PK_COLUMNS_STR_COL = "pk_columns_str" // e.g., "id,name"
   val COMPARE_COLUMN_NAMES_STR_COL = "compare_column_names_str" // e.g., "colA,colB,colC"
+  val SOURCE_MAPPING_COLUMNS_STR_COL = "source_mapping_columns_str" // New
+  val TARGET_MAPPING_COLUMNS_STR_COL = "target_mapping_columns_str" // New
 
   // For Single Business Rule (if checkBusinessTransformation is "Yes")
   val BUSINESS_RULE_NAME_COL = "business_rule_name"
   val BUSINESS_RULE_SQL_COL = "business_rule_sql"
-  val BUSINESS_RULE_EXPECTED_RESULT_COL = "business_rule_expected_result"
+  val BUSINESS_RULE_EXPECTED_RESULT_COL = "business_rule_expected_result" // For legacy/simple rule
+  val BUSINESS_RULE_TARGET_JOIN_KEYS_STR_COL = "business_rule_target_join_keys_str" // New, for rule vs target comparison
 
   // For HdfsOutputConfig (Option[HdfsOutputConfig]) - check existence by a key field like path
   val HDFS_OUTPUT_PATH_COL = "hdfs_output_path"
@@ -152,8 +157,9 @@ object JdbcConfigFetcher {
           // Boolean flags (assuming string "true"/"false" or "yes"/"no" from DB)
           val performRowCountCheck = safeParseBoolean(rs.getString(PERFORM_ROW_COUNT_CHECK_COL), default = true)
           val performSchemaCheck = safeParseBoolean(rs.getString(PERFORM_SCHEMA_CHECK_COL), default = true)
-          val performDataReconciliation = safeParseBoolean(rs.getString(PERFORM_DATA_RECON_COL), default = true)
-          val checkBusinessTransformation = safeParseBoolean(rs.getString(CHECK_BUSINESS_TRANSFORMATION_COL), default = false)
+          val sourceToTargetFlag = safeParseBoolean(rs.getString(SOURCE_TO_TARGET_FLAG_COL), default = true)
+          val businessRuleComparisonFlag = safeParseBoolean(rs.getString(BUSINESS_RULE_COMPARISON_FLAG_COL), default = false)
+          val checkBusinessTransformation = safeParseBoolean(rs.getString(CHECK_BUSINESS_TRANSFORMATION_COL), default = false) // For the legacy/simple business rule
 
           // Int/Double fields (optional, from string columns)
           val sampleMismatchLimit = safeParseOptionInt(Option(rs.getString(SAMPLE_MISMATCH_LIMIT_COL))).getOrElse(100)
@@ -218,20 +224,44 @@ object JdbcConfigFetcher {
               )).toSeq
             ).getOrElse(Seq.empty)
 
-          // Business Rule (single rule, conditional)
-          val businessRules: Option[Seq[BusinessRuleConfig]] = if (checkBusinessTransformation) {
+          // Column Name Mapping
+          val sourceMappingStrOpt = Option(rs.getString(SOURCE_MAPPING_COLUMNS_STR_COL))
+          val targetMappingStrOpt = Option(rs.getString(TARGET_MAPPING_COLUMNS_STR_COL))
+          val columnNameMapping: Option[Map[String, String]] = (sourceMappingStrOpt, targetMappingStrOpt) match {
+            case (Some(srcMapStr), Some(tgtMapStr)) if srcMapStr.trim.nonEmpty && tgtMapStr.trim.nonEmpty =>
+              val srcCols = srcMapStr.split(',').map(_.trim).filter(_.nonEmpty)
+              val tgtCols = tgtMapStr.split(',').map(_.trim).filter(_.nonEmpty)
+              if (srcCols.length == tgtCols.length && srcCols.nonEmpty) {
+                Some(srcCols.zip(tgtCols).toMap)
+              } else {
+                logger.warn(s"Column mapping strings for job '$jobName' have different numbers of columns or are empty after parsing. Source: '$srcMapStr', Target: '$tgtMapStr'. No mapping will be applied.")
+                None
+              }
+            case _ => None // No mapping if one or both strings are null/empty
+          }
+
+          // Business Rule (single rule, conditional for legacy check OR for new comparison mode)
+          val businessRuleTargetJoinKeysStrOpt = Option(rs.getString(BUSINESS_RULE_TARGET_JOIN_KEYS_STR_COL))
+          val businessRuleTargetJoinKeys = businessRuleTargetJoinKeysStrOpt
+            .map(_.split(',').map(_.trim).filter(_.nonEmpty).toSeq)
+            .filter(_.nonEmpty) // Ensure we have some keys if the string was there
+
+          val businessRules: Option[Seq[BusinessRuleConfig]] = if (checkBusinessTransformation || businessRuleComparisonFlag) {
             val ruleNameOpt = Option(rs.getString(BUSINESS_RULE_NAME_COL))
             val sqlOpt = Option(rs.getString(BUSINESS_RULE_SQL_COL))
-            // Only create rule if name and SQL are present
+
             (ruleNameOpt, sqlOpt) match {
               case (Some(name), Some(sql)) if name.nonEmpty && sql.nonEmpty =>
                 Some(Seq(BusinessRuleConfig(
                   ruleName = name,
                   sqlQuery = sql,
-                  expectedResult = Option(rs.getString(BUSINESS_RULE_EXPECTED_RESULT_COL))
+                  expectedResult = Option(rs.getString(BUSINESS_RULE_EXPECTED_RESULT_COL)), // Still read for legacy or if needed
+                  joinKeysForTargetComparison = businessRuleTargetJoinKeys
                 )))
               case _ =>
-                logger.warn(s"Business rule transformation checked for job '$jobName' but rule name or SQL is missing. Skipping business rule.")
+                if (checkBusinessTransformation || businessRuleComparisonFlag) { // Log only if a rule was expected
+                  logger.warn(s"Business rule flag (checkBusinessTransformation or businessRuleComparisonFlag) set for job '$jobName' but rule name or SQL is missing. Skipping business rule.")
+                }
                 None
             }
           } else {
@@ -278,13 +308,15 @@ object JdbcConfigFetcher {
             jobName = jobName,
             sourceConfig = sourceConfig,
             targetConfig = targetConfig,
+            columnNameMapping = columnNameMapping, // Added
             primaryKeyColumns = primaryKeyColumns,
             columnsToCompare = columnsToCompare,
             businessRules = businessRules,
             performRowCountCheck = performRowCountCheck,
             performSchemaCheck = performSchemaCheck,
-            performDataReconciliation = performDataReconciliation,
-            checkBusinessTransformation = checkBusinessTransformation, // Added this field
+            sourceToTargetFlag = sourceToTargetFlag, // Added
+            businessRuleComparisonFlag = businessRuleComparisonFlag, // Added
+            checkBusinessTransformation = checkBusinessTransformation,
             hdfsOutput = hdfsOutput,
             hiveOutput = hiveOutput,
             emailNotifications = emailNotifications,

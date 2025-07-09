@@ -7,6 +7,7 @@ import org.apache.spark.sql.functions._ // Wildcard import for col, lit, udf, si
 import org.apache.spark.sql.types._ // Wildcard for StructType, ArrayType etc.
 import org.slf4j.LoggerFactory // Added for logging
 import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
+import com.example.reconciler.util.DataFrameTransformer // For column mapping
 
 
 class ReconciliationService(implicit spark: SparkSession) {
@@ -419,8 +420,10 @@ class ReconciliationService(implicit spark: SparkSession) {
   def executeBusinessRules(
     rules: Seq[BusinessRuleConfig]
   )(implicit spark: SparkSession): Seq[BusinessRuleResult] = {
-    rules.map { rule =>
-      logger.info(s"Executing business rule: ${rule.ruleName} - Query: ${rule.sqlQuery}")
+    // This method now only handles the "legacy" business rules that compare against a literal expectedResult.
+    // The new business rule vs. target comparison is handled by `executeAndCompareBusinessRule`.
+    rules.filter(rule => rule.expectedResult.isDefined || rule.joinKeysForTargetComparison.isEmpty).map { rule => // Process only if expectedResult is there OR no target join keys
+      logger.info(s"Executing legacy business rule (vs literal): ${rule.ruleName} - Query: ${rule.sqlQuery}")
       Try {
         val df = spark.sql(rule.sqlQuery)
         val actualValueOpt: Option[String] = df.collect().headOption.flatMap { row =>
@@ -431,21 +434,110 @@ class ReconciliationService(implicit spark: SparkSession) {
           case (Some(expected), Some(actual)) =>
             if (expected.trim == actual.trim) (Success, Some("Result matches expected value."))
             else (Failure, Some(s"Mismatch: Expected '$expected', Actual '$actual'"))
-          case (None, Some(actual)) =>
-            (Failure, Some(s"Expected no result (None), but got '$actual'.")) // Or could be Pass if query is for validation
+          case (None, Some(actual)) => // Rule ran, got a result, but no expected result to compare against for this type of rule
+             (Success, Some(s"Rule executed, actual result: '$actual'. No literal expected result defined for direct comparison for rule type."))
           case (Some(expected), None) =>
             (Failure, Some(s"Expected '$expected', but got no result (None)."))
-          case (None, None) =>
-            (Success, Some("Both expected and actual results are None/empty.")) // Or could be by design
+          case (None, None) => // Rule ran, no result, no expected result.
+            (Success, Some("Rule executed, no result returned. No literal expected result defined."))
         }
         BusinessRuleResult(rule.ruleName, status, rule.sqlQuery, rule.expectedResult, actualValueOpt, remark)
       } match {
         case TrySuccess(result) => result
         case TryFailure(ex) =>
-          logger.error(s"Failed to execute business rule '${rule.ruleName}': ${ex.getMessage}", ex)
-          // ex.printStackTrace() // Logging framework will handle stack trace
+          logger.error(s"Failed to execute legacy business rule '${rule.ruleName}': ${ex.getMessage}", ex)
           BusinessRuleResult(rule.ruleName, Failure, rule.sqlQuery, rule.expectedResult, None, Some(s"Execution error: ${ex.getMessage}"))
       }
+    }
+  }
+
+  /**
+   * Executes a business rule SQL, then compares its result DataFrame against a target DataFrame.
+   *
+   * @param rule The BusinessRuleConfig containing the SQL query and target join keys.
+   * @param targetDf The target DataFrame to compare against.
+   * @param jobConfig The overall job configuration, used for column mapping and comparison definitions.
+   * @return An Option[ValueComparisonResult] summarizing the comparison. None if setup is invalid.
+   */
+  def executeAndCompareBusinessRule(
+    rule: BusinessRuleConfig,
+    targetDf: DataFrame,
+    jobConfig: ReconciliationJobConfig
+  )(implicit spark: SparkSession): Option[ValueComparisonResult] = {
+    logger.info(s"Executing business rule for comparison against target: ${rule.ruleName} - Query: ${rule.sqlQuery}")
+
+    rule.joinKeysForTargetComparison match {
+      case Some(joinKeys) if joinKeys.nonEmpty =>
+        Try {
+          var businessRuleResultDf = spark.sql(rule.sqlQuery)
+          logger.info(s"Business rule SQL query executed. Result schema for '${rule.ruleName}':")
+          businessRuleResultDf.printSchema()
+
+          // Apply column mapping if provided in jobConfig to align businessRuleResultDf with target naming conventions
+          val mappedBusinessRuleResultDf = jobConfig.columnNameMapping match {
+            case Some(mapping) if mapping.nonEmpty =>
+              logger.info(s"Applying column mapping to business rule result for '${rule.ruleName}'")
+              DataFrameTransformer.applyColumnMapping(businessRuleResultDf, mapping)
+            case _ =>
+              logger.info(s"No column mapping defined or mapping is empty. Using business rule result columns as is for '${rule.ruleName}'.")
+              businessRuleResultDf
+          }
+          logger.info(s"Schema of (mapped) business rule result for '${rule.ruleName}' before aliasing for comparison:")
+          mappedBusinessRuleResultDf.printSchema()
+
+          // Prepare business rule result DF for comparison (prefixing columns with "src_")
+          // PK columns for comparison should be the joinKeysForTargetComparison
+          // Data columns for comparison come from jobConfig.columnsToCompare
+          val aliasedBusinessRuleResultDf = mappedBusinessRuleResultDf.select(
+            (joinKeys ++ jobConfig.columnsToCompare.map(_.columnName)).distinct
+              .map(c => mappedBusinessRuleResultDf(c).alias(if (joinKeys.contains(c)) c else s"src_$c")): _*
+          )
+          // Ensure all join key columns are present in aliasedBusinessRuleResultDf
+          joinKeys.foreach{ keyCol =>
+            if (!aliasedBusinessRuleResultDf.columns.contains(keyCol)) {
+                 throw new IllegalArgumentException(s"Join key column '$keyCol' not found in the (mapped) business rule result for rule '${rule.ruleName}'. Available columns: ${aliasedBusinessRuleResultDf.columns.mkString(", ")}")
+            }
+          }
+
+
+          // Prepare target DF for comparison (prefixing columns with "tgt_")
+          val aliasedTargetDf = targetDf.select(
+            (joinKeys ++ jobConfig.columnsToCompare.map(_.columnName)).distinct
+              .map(c => targetDf(c).alias(if (joinKeys.contains(c)) c else s"tgt_$c")): _*
+          )
+           // Ensure all join key columns are present in aliasedTargetDf
+          joinKeys.foreach{ keyCol =>
+            if (!aliasedTargetDf.columns.contains(keyCol)) {
+                 throw new IllegalArgumentException(s"Join key column '$keyCol' not found in the target DataFrame for rule '${rule.ruleName}'. Available columns: ${aliasedTargetDf.columns.mkString(", ")}")
+            }
+          }
+
+
+          logger.info(s"Joining business rule result with target on keys: ${joinKeys.mkString(", ")} for rule '${rule.ruleName}'")
+          // Perform an inner join: we only care about records present in both for value comparison based on this rule type
+          val joinedForComparisonDf = aliasedBusinessRuleResultDf.join(aliasedTargetDf, joinKeys, "inner")
+          logger.info(s"Join for business rule '${rule.ruleName}' completed. Found ${joinedForComparisonDf.count()} records to compare values.")
+
+          if (joinedForComparisonDf.isEmpty) {
+             logger.warn(s"No records found after joining business rule result with target for rule '${rule.ruleName}'. Skipping value comparison.")
+             // Return a successful ValueComparisonResult with 0 rows compared, 0 mismatches
+             Some(ValueComparisonResult(Success, spark.emptyDataFrame, 0, 0, Map.empty, "No common records found between business rule result and target based on join keys."))
+          } else {
+              // Now call the existing compareColumnValues logic.
+              // We need to ensure jobConfig used here has primaryKeyColumns set to `joinKeys` for this specific call.
+              val tempJobConfigForComparison = jobConfig.copy(primaryKeyColumns = joinKeys)
+              Some(compareColumnValues(joinedForComparisonDf, tempJobConfigForComparison))
+          }
+
+        } match {
+          case TrySuccess(result) => result
+          case TryFailure(ex) =>
+            logger.error(s"Failed to execute and compare business rule '${rule.ruleName}' against target: ${ex.getMessage}", ex)
+            Some(ValueComparisonResult(Failure, spark.emptyDataFrame, 0, 0, Map.empty, s"Error comparing rule '${rule.ruleName}': ${ex.getMessage}"))
+        }
+      case _ =>
+        logger.warn(s"Business rule '${rule.ruleName}' is configured for target comparison but 'joinKeysForTargetComparison' are missing or empty. Skipping comparison.")
+        None
     }
   }
 }

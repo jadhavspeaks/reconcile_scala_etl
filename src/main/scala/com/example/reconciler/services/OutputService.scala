@@ -256,6 +256,43 @@ class OutputService(implicit spark: SparkSession) {
         }
       }
 
+      // 5. Business Rule Comparison Mismatches (New - SQL result vs Target)
+      summary.businessRuleComparisonResult.foreach { brCompResult =>
+        if (brCompResult.status == Failure && !brCompResult.mismatchedRecordsDf.isEmpty) {
+          logger.info(s"Processing mismatches from Business Rule vs Target comparison for job ${summary.jobId}")
+          // The mismatchedRecordsDf from ValueComparisonResult (which brCompResult is)
+          // contains the join keys used for that comparison and the 'mismatches' array.
+          // We need to use those specific join keys for primary_keys_json.
+          // If jobConfig.businessRules is Some(Seq(rule)), then rule.joinKeysForTargetComparison are the keys.
+          // This assumes there's one effective rule for this comparison type.
+          val brJoinKeys = jobConfig.businessRules.flatMap(_.headOption.flatMap(_.joinKeysForTargetComparison)).getOrElse(pkColumnsSeq)
+          if (brJoinKeys.isEmpty) {
+            logger.warn("Business Rule comparison mismatches found, but no join keys defined for it. Cannot reliably create primary_keys_json for detail log. Using job's main PKs as fallback.")
+          }
+
+          val explodedBrMismatches = brCompResult.mismatchedRecordsDf
+            .withColumn("mismatch_detail", explode(col("mismatches")))
+            .select(
+              lit(summary.jobId).alias("job_id"),
+              lit(UUID.randomUUID().toString).alias("detail_id"),
+              lit("BUSINESS_RULE_VS_TARGET_MISMATCH").alias("detail_type"),
+              lit(currentTimestamp).alias("event_timestamp"),
+              to_json(struct(brJoinKeys.map(col): _*)).alias("primary_keys_json"),
+              col("mismatch_detail.columnName").alias("attribute_name"),
+              col("mismatch_detail.sourceValue").alias("source_value"), // "source" here refers to business rule result
+              col("mismatch_detail.targetValue").alias("target_value"), // "target" is the target table
+              col("mismatch_detail.remark").alias("remarks"),
+              lit(null).cast(StringType).alias("additional_data_json")
+            )
+            .select(commonDetailSchema.fieldNames.map(name => col(name)): _*)
+
+          if (!explodedBrMismatches.isEmpty) {
+            detailsToSave += explodedBrMismatches
+          }
+        }
+      }
+
+
       if (detailsToSave.nonEmpty) {
         val finalDetailsDf = detailsToSave.reduce(_ unionByName _)
         logger.info(s"Saving ${finalDetailsDf.count()} detailed events to $fullDetailTableName")
@@ -296,7 +333,12 @@ class OutputService(implicit spark: SparkSession) {
         summary.dataMatchingResult.map(_.targetOnlyKeyCount).orNull, summary.valueComparisonResult.map(_.status.toString).orNull,
         summary.valueComparisonResult.map(_.totalComparedRows).orNull, summary.valueComparisonResult.map(_.mismatchedRowCount).orNull,
         summary.businessRuleResults.map(brrList => if (brrList.exists(_.status == Failure)) Failure.toString else Success.toString).orNull,
-        summary.businessRuleResults.map(_.size).orNull, summary.businessRuleResults.map(_.count(_.status == Failure)).orNull,
+        summary.businessRuleResults.map(brrList => if (brrList.exists(_.status == Failure)) Failure.toString else Success.toString).orNull, // Legacy BR status
+        summary.businessRuleResults.map(_.size).orNull, // Legacy BR total
+        summary.businessRuleResults.map(_.count(_.status == Failure)).orNull, // Legacy BR failed
+        summary.businessRuleComparisonResult.map(_.status.toString).orNull, // New BR vs Target status
+        summary.businessRuleComparisonResult.map(_.totalComparedRows).orNull,
+        summary.businessRuleComparisonResult.map(_.mismatchedRowCount).orNull,
         summary.errorMessages.mkString("; ")
       ))
       val summarySchema = StructType(Seq(
@@ -304,15 +346,27 @@ class OutputService(implicit spark: SparkSession) {
         StructField("overall_status", StringType, nullable = true), StructField("start_time_ms", LongType, nullable = true),
         StructField("end_time_ms", LongType, nullable = true), StructField("duration_ms", LongType, nullable = true),
         StructField("source_name", StringType, nullable = true), StructField("target_name", StringType, nullable = true),
+        // Row Count
         StructField("rc_status", StringType, nullable = true), StructField("rc_source_row_count", LongType, nullable = true),
         StructField("rc_target_row_count", LongType, nullable = true), StructField("rc_difference", LongType, nullable = true),
+        // Schema
         StructField("schema_status", StringType, nullable = true), StructField("schema_mismatch_count", IntegerType, nullable = true),
+        // Data Matching (Source vs Target)
         StructField("dm_status", StringType, nullable = true), StructField("dm_source_total_keys", LongType, nullable = true),
         StructField("dm_target_total_keys", LongType, nullable = true), StructField("dm_matched_key_count", LongType, nullable = true),
         StructField("dm_source_only_key_count", LongType, nullable = true), StructField("dm_target_only_key_count", LongType, nullable = true),
+        // Value Comparison (Source vs Target)
         StructField("vc_status", StringType, nullable = true), StructField("vc_total_compared_rows", LongType, nullable = true),
-        StructField("vc_mismatched_row_count", LongType, nullable = true), StructField("br_status", StringType, nullable = true),
-        StructField("br_total_rules", IntegerType, nullable = true), StructField("br_failed_rules", IntegerType, nullable = true),
+        StructField("vc_mismatched_row_count", LongType, nullable = true),
+        // Business Rules (Legacy - vs literal)
+        StructField("br_legacy_status", StringType, nullable = true),
+        StructField("br_legacy_total_rules", IntegerType, nullable = true),
+        StructField("br_legacy_failed_rules", IntegerType, nullable = true),
+        // Business Rule Comparison (New - SQL result vs Target)
+        StructField("br_comp_status", StringType, nullable = true),
+        StructField("br_comp_total_rows", LongType, nullable = true),
+        StructField("br_comp_mismatched_rows", LongType, nullable = true),
+        // Errors
         StructField("error_messages_summary", StringType, nullable = true)
       ))
       val comprehensiveSummaryDf = spark.createDataFrame(spark.sparkContext.parallelize(summaryData), summarySchema)

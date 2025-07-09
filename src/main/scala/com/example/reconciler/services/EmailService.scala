@@ -118,6 +118,21 @@ class EmailService {
       }
     }
 
+    // New section for Business Rule Comparison Result (SQL result vs Target)
+    summary.businessRuleComparisonResult.foreach { brcr =>
+      sb.append("<h2>Business Rule Comparison (SQL Result vs. Target):</h2>")
+      sb.append(s"<p>Status: <span style='font-weight:bold; color:${statusColor(brcr.status)}'>${brcr.status}</span></p>")
+      sb.append(s"<p>Total Rows Compared in Target (after join with rule result): ${brcr.totalComparedRows}</p>")
+      sb.append(s"<p>Rows with Mismatches: ${brcr.mismatchedRowCount}</p>")
+      if(brcr.mismatchedRowCount > 0) {
+        sb.append("<h3>Mismatch Counts per Column (Rule vs. Target):</h3><ul>")
+        brcr.columnMismatchCounts.foreach { case (col, count) => sb.append(s"<li>${htmlEscape(col)}: $count</li>") }
+        sb.append("</ul>")
+        // Could add link to HDFS/Hive table for full mismatch details for this comparison
+      }
+      sb.append(s"<p>${htmlEscape(brcr.summaryMessage)}</p>")
+    }
+
     sb.append("</body></html>")
     sb.toString()
   }
