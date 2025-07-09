@@ -23,7 +23,7 @@ case class RowCountSummary(
   }
 }
 
-class ReconciliationService(implicit spark: SparkSession) {
+class ReconciliationService(spark: SparkSession) {
 
   /**
    * Compares the row counts of two DataFrames.
@@ -59,5 +59,5 @@ class ReconciliationService(implicit spark: SparkSession) {
 }
 
 object ReconciliationService {
-  def apply()(implicit spark: SparkSession): ReconciliationService = new ReconciliationService()
+  def apply(spark: SparkSession): ReconciliationService = new ReconciliationService(spark)
 }

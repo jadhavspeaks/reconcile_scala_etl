@@ -137,19 +137,17 @@
         -->
 
         <!-- Oracle JDBC Driver -->
+        <!--
         <dependency>
             <groupId>com.oracle.database.jdbc</groupId>
             <artifactId>ojdbc8</artifactId>
-            <version>19.3.0.0</version> <!-- Ensure this version is compatible with your Oracle DB -->
+            <version>19.3.0.0</version>
         </dependency>
+        -->
 
     </dependencies>
 
     <repositories> <!-- Added repositories which might have been missing -->
-        <repository>
-            <id>spark-packages</id>
-            <url>https://dl.bintray.com/spark-packages/maven/</url>
-        </repository>
         <repository>
             <id>central</id>
             <url>https://repo.maven.apache.org/maven2</url>

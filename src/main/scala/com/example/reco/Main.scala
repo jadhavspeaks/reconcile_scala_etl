@@ -37,7 +37,7 @@ object Main {
         // --- 3. Initialize Services/Readers ---
         val csvReader = new CsvReader()
         val hiveReader = new HiveReader() // Assumes HiveContext is available via SparkSession with Hive support
-        val reconService = new ReconciliationService()
+        val reconService = ReconciliationService(spark) // Use apply method and pass spark session
         val reportGenerator = new BasicReportGenerator()
 
         // --- 4. Read Source A (e.g., CSV file) ---
@@ -56,8 +56,14 @@ object Main {
               spark.emptyDataFrame
           }
         } catch {
-          case e: Exception =>
-            println(s"Error reading Source A (${config.sourceA.name}): ${e.getMessage}")
+          case e: org.apache.spark.sql.AnalysisException => // More specific Spark SQL exception
+            println(s"Spark SQL Analysis Error reading Source A (${config.sourceA.name}): ${e.getMessage}")
+            spark.emptyDataFrame
+          case e: java.io.IOException => // More specific IO exception
+            println(s"IO Error reading Source A (${config.sourceA.name}): ${e.getMessage}")
+            spark.emptyDataFrame
+          case e: Exception => // Fallback for other exceptions
+            println(s"Unexpected error reading Source A (${config.sourceA.name}): ${e.getMessage}")
             spark.emptyDataFrame
         }
         println(s"Source A (${config.sourceA.name}) schema:")
@@ -80,9 +86,15 @@ object Main {
               spark.emptyDataFrame
           }
         } catch {
-          case e: Exception =>
+           case e: org.apache.spark.sql.AnalysisException => // More specific Spark SQL exception
             // This catch block might be more relevant if trying to connect to a real Hive
-            println(s"Error reading Source B (${config.sourceB.name}): ${e.getMessage}")
+             println(s"Spark SQL Analysis Error reading Source B (${config.sourceB.name}): ${e.getMessage}")
+             spark.emptyDataFrame
+           case e: java.io.IOException => // More specific IO exception
+             println(s"IO Error reading Source B (${config.sourceB.name}): ${e.getMessage}")
+             spark.emptyDataFrame
+           case e: Exception => // Fallback for other exceptions
+             println(s"Unexpected error reading Source B (${config.sourceB.name}): ${e.getMessage}")
             spark.emptyDataFrame
         }
         println(s"Source B (${config.sourceB.name}) schema:")
