@@ -101,18 +101,19 @@ The following environment variables must be set to enable JDBC configuration fet
 *   `RECON_JOBS_SQL_QUERY`: The SQL query to execute to fetch job configurations. This query should return all necessary columns to populate `ReconciliationJobConfig`.
 
 ### Database ResultSet Structure for Configuration:
-The `RECON_JOBS_SQL_QUERY` is expected to return rows where:
-*   Most fields of `ReconciliationJobConfig` are mapped directly from columns in the ResultSet (e.g., a column `job_id` maps to `ReconciliationJobConfig.jobId`).
-*   **Complex/Nested Structures as JSON Strings**: For more complex parts of the configuration (nested objects or sequences of objects), the corresponding column in the ResultSet is expected to contain a **JSON string**. This JSON string is then parsed into the appropriate Scala case class structure. Assumed column names for these JSON parts (these are configurable within `JdbcConfigFetcher.scala` but good defaults are provided):
-    *   `source_config_json`: JSON object for `DataSourceConfig` (source).
-    *   `target_config_json`: JSON object for `DataSourceConfig` (target).
-    *   `pk_columns_json`: JSON array of strings for `primaryKeyColumns`.
-    *   `columns_to_compare_json`: JSON array of `ReconColumnConfig` objects.
-    *   `business_rules_json`: Optional JSON array of `BusinessRuleConfig` objects.
-    *   `hdfs_output_json`: Optional JSON object for `HdfsOutputConfig`.
-    *   `hive_output_json`: Optional JSON object for `HiveOutputConfig`.
-    *   `email_notifications_json`: Optional JSON object for `EmailConfig`.
-    Refer to `JdbcConfigFetcher.scala` for the constant definitions of these expected column names (e.g., `JdbcConfigFetcher.SOURCE_CONFIG_JSON_COL`).
+The `RECON_JOBS_SQL_QUERY` is expected to return rows where all configuration parameters are **flattened into individual string columns**. `JdbcConfigFetcher.scala` then maps these string columns to the appropriate fields and types in the `ReconciliationJobConfig` case class.
+
+*   **Directly Mapped Fields**: Simple fields like `job_id`, `job_name`, boolean flags (e.g., `perform_row_count_check`, stored as "true"/"false" or "yes"/"no" strings), and numeric values (stored as strings) are mapped directly.
+*   **Nested Objects (e.g., `DataSourceConfig`, `HdfsOutputConfig`, `EmailConfig`):**
+    *   These are constructed by reading multiple related flat columns. For example, `sourceConfig` is built by reading `source_type` (e.g., "file" or "hive") and then conditionally reading other columns like `source_file_path`, `source_file_format` or `source_hive_db`, `source_hive_table`.
+*   **Sequences from Comma-Separated Strings:**
+    *   `primaryKeyColumns` (`Seq[String]`): Expected from a single column (e.g., `pk_columns_str`) containing comma-separated column names.
+    *   `columnsToCompare` (`Seq[ReconColumnConfig]`): Expected from a single column (e.g., `compare_column_names_str`) containing comma-separated column names. Each name results in a `ReconColumnConfig` with default comparison attributes (e.g., case-sensitive, exact match).
+    *   `emailNotifications.recipients` (`Seq[String]`): Expected from a single column (e.g., `email_recipients_str`) with comma-separated email addresses.
+*   **Business Rule Handling:**
+    *   A column `check_business_transformation` (string "Yes" or "No") determines if a business rule is processed.
+    *   If "Yes", then columns `business_rule_name`, `business_rule_sql`, and `business_rule_expected_result` are read to define a single `BusinessRuleConfig` for the job.
+*   Refer to `JdbcConfigFetcher.scala` for the defined constant names for all expected columns (e.g., `JdbcConfigFetcher.JOB_ID_COL`, `JdbcConfigFetcher.SOURCE_TYPE_COL`, `JdbcConfigFetcher.PK_COLUMNS_STR_COL`).
 
 ### Key Configuration Parameters (Scala Case Classes - `ReconciliationJobConfig`):
 

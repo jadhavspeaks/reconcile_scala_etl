@@ -88,6 +88,7 @@ case class ReconciliationJobConfig(
   performRowCountCheck: Boolean = true,
   performSchemaCheck: Boolean = true,
   performDataReconciliation: Boolean = true,
+  checkBusinessTransformation: Boolean = false, // New field, default to false
   hdfsOutput: Option[HdfsOutputConfig] = None,
   hiveOutput: Option[HiveOutputConfig] = None,
   emailNotifications: Option[EmailConfig] = None,
@@ -97,7 +98,7 @@ case class ReconciliationJobConfig(
   timeoutSeconds: Option[Int] = Some(60) // Timeout for API calls
 )
 
-object OracleConfigFetcher {
+object OracleConfigFetcher { // This object will be replaced by JdbcConfigFetcher logic elsewhere
   import org.json4s._
   import org.json4s.native.JsonMethods._
   import org.json4s.ext.EnumNameSerializer

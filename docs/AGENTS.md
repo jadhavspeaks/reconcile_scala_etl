@@ -16,7 +16,7 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 *   **`com.example.reconciler.Main`**: The entry point of the Spark application. It orchestrates fetching job configurations via JDBC (potentially multiple), iterating through them, setting up Spark, calling services for each job, and handling top-level errors.
 *   **`com.example.reconciler.config`**:
     *   Contains Scala case classes (`ReconciliationJobConfig`, `DataSourceConfig`, `HiveOutputConfig`, etc.) that define the structure of the job configuration.
-    *   `JdbcConfigFetcher`: Responsible for fetching job configurations from a database via JDBC and mapping `ResultSet` data (including parsing JSON strings for complex parts) to the Scala case classes.
+    *   `JdbcConfigFetcher`: Responsible for fetching job configurations from a database via JDBC. It maps a **fully flattened ResultSet (string columns)** to the Scala case classes, including custom parsing for comma-separated lists and conditional logic for business rules based on a `checkBusinessTransformation` flag.
 *   **`com.example.reconciler.readers`**:
     *   `DataSourceReader`: A trait defining the contract for reading data.
     *   `FileDataSourceReader`, `HiveDataSourceReader`: Implementations for different source types.
@@ -31,10 +31,14 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
 ### 3. Configuration:
 
 *   Job configurations are fetched from a database via JDBC. The `JdbcConfigFetcher` uses a configurable SQL query (from `RECON_JOBS_SQL_QUERY` env var) to retrieve rows.
-*   Each row is mapped to a `ReconciliationJobConfig` Scala case class.
-    *   Simple fields are mapped directly from ResultSet columns.
-    *   Complex nested objects (like `sourceConfig`, `targetConfig`) and sequences (like `columnsToCompare`, `businessRules`) are expected to be stored as **JSON strings** in dedicated columns within the ResultSet. `JdbcConfigFetcher` then parses these JSON strings.
-*   Refer to `ReconciliationConfig.scala` for the canonical structure of `ReconciliationJobConfig` and its nested case classes.
+*   Each row from the ResultSet is mapped to a `ReconciliationJobConfig` Scala case class. The ResultSet is expected to have a **fully flattened structure**, where all configuration parameters, including those for nested objects and sequences, are represented as individual string columns.
+    *   **Direct Mapping**: Simple fields are read as strings and converted to their target types (Boolean, Int, Double, etc.).
+    *   **Nested Object Construction**: Objects like `DataSourceConfig`, `HdfsOutputConfig`, etc., are manually constructed by reading their constituent fields from multiple dedicated string columns (e.g., `source_type`, `source_file_path`, `source_file_format` for a source file).
+    *   **Sequence Parsing**:
+        *   `primaryKeyColumns` and `columnsToCompare` (names only) are parsed from single, comma-separated string columns (e.g., `pk_columns_str`, `compare_column_names_str`). `ReconColumnConfig` objects for `columnsToCompare` are created with default attributes.
+        *   `emailNotifications.recipients` are parsed from a comma-separated string column.
+    *   **Business Rule Handling**: A `check_business_transformation` string column ("Yes"/"No") controls whether a single business rule is processed. If "Yes", then `business_rule_name`, `business_rule_sql`, and `business_rule_expected_result` string columns are used to create the rule.
+*   Refer to `ReconciliationConfig.scala` for the `ReconciliationJobConfig` structure and `JdbcConfigFetcher.scala` for the expected constant column names from the ResultSet.
 *   **JDBC Connection Details**: These are provided via environment variables:
     *   `RECON_JOBS_JDBC_URL`
     *   `RECON_JOBS_JDBC_USER`
@@ -92,7 +96,7 @@ This document provides guidance for AI agents working on the Scala/Spark `data-r
     *   Be mindful of Hive table schemas when writing DataFrames.
     *   Use appropriate `SaveMode` (e.g., `Append`, `Overwrite`).
 *   **Logging:** Use the SLF4J loggers provided or instantiated within classes. Log important events, decisions, errors, and key data points (like counts) to aid diagnostics.
-*   **Configuration Data Source Changes**: If the structure of `ReconciliationJobConfig` changes, or if the way data is stored in the configuration database (e.g., column names for JSON strings, or structure of those JSONs) changes, ensure `JdbcConfigFetcher`'s mapping logic is updated accordingly.
+*   **Configuration Data Source Changes**: If `ReconciliationJobConfig` structure changes, or if the column names/expected string formats in the configuration database change, `JdbcConfigFetcher.scala`'s mapping logic (including column name constants and parsing functions) must be updated.
 
 ### 9. Workflow for Making Changes:
 
