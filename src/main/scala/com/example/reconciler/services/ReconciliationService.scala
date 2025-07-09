@@ -159,7 +159,9 @@ class ReconciliationService(implicit spark: SparkSession) {
     val aliasedSourceDf = sourceDf.select(sourceDf.columns.map(c => col(c).as(if (pkCols.contains(c)) c else s"src_$c")): _*)
     val aliasedTargetDf = targetDf.select(targetDf.columns.map(c => col(c).as(if (pkCols.contains(c)) c else s"tgt_$c")): _*)
 
+    println(s"INFO: Performing full outer join on PKs: ${pkCols.mkString(", ")}")
     val joinedDf = aliasedSourceDf.join(aliasedTargetDf, pkCols, "full_outer")
+    println("INFO: Caching joined DataFrame for matching analysis.")
     joinedDf.cache() // Cache for multiple passes
 
     // Conditions for different sets

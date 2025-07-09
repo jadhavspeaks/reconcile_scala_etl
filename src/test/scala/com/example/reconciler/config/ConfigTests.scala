@@ -1,11 +1,13 @@
 package com.example.reconciler.config
 
-import com.example.reconciler.SparkSessionTestWrapper
-import org.scalatest.funsuite.AnyFunSuite
-import org.scalatest.matchers.should.Matchers
+// import com.example.reconciler.SparkSessionTestWrapper // May not be needed if OracleConfigFetcherSuite remains commented
+import org.scalatest.FunSuite // Changed from AnyFunSuite
+import org.scalatest.Matchers // Changed from matchers.should.Matchers
 import org.apache.spark.sql.types._
+import scala.util.Try // For tests that were commented out, but good to have if they are re-enabled
+import com.example.reconciler.readers.SparkSchemaConverter // Added import
 
-class SparkSchemaConverterSuite extends AnyFunSuite with Matchers {
+class SparkSchemaConverterSuite extends FunSuite with Matchers {
 
   test("toSparkSchema should convert SchemaColumnConfig to StructType correctly") {
     val customSchema = Seq(
@@ -39,14 +41,14 @@ class SparkSchemaConverterSuite extends AnyFunSuite with Matchers {
     ))
 
     val actualSparkSchema = SparkSchemaConverter.toSparkSchema(customSchema)
-    actualSparkSchema shouldEqual expectedSparkSchema
+    actualSparkSchema should be (expectedSparkSchema) // Changed from shouldEqual
   }
 
   test("toSparkSchema should handle empty input") {
     val customSchema = Seq.empty[SchemaColumnConfig]
     val expectedSparkSchema = StructType(Seq.empty[StructField])
     val actualSparkSchema = SparkSchemaConverter.toSparkSchema(customSchema)
-    actualSparkSchema shouldEqual expectedSparkSchema
+    actualSparkSchema should be (expectedSparkSchema) // Changed from shouldEqual
   }
 
   test("toSparkSchema should handle various casings for type names") {
@@ -63,12 +65,12 @@ class SparkSchemaConverterSuite extends AnyFunSuite with Matchers {
       StructField("col4", DecimalType(5,0), true)
     ))
     val actualSparkSchema = SparkSchemaConverter.toSparkSchema(customSchema)
-    actualSparkSchema shouldEqual expectedSparkSchema
+    actualSparkSchema should be (expectedSparkSchema) // Changed from shouldEqual
   }
 }
 
 /* // Temporarily commented out OracleConfigFetcherSuite due to API signature change and to isolate ScalaTest setup issues
-class OracleConfigFetcherSuite extends AnyFunSuite with Matchers with SparkSessionTestWrapper {
+class OracleConfigFetcherSuite extends FunSuite with Matchers with SparkSessionTestWrapper {
   // OracleConfigFetcher.fetchConfig requires an implicit SparkSession
   // It doesn't use it in the placeholder, but the signature requires it.
 

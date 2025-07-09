@@ -99,7 +99,7 @@ case class ReconciliationJobConfig(
 object OracleConfigFetcher {
   import org.json4s._
   import org.json4s.native.JsonMethods._
-  import org.json4s.ext.EnumNameSerializer
+  import org.json4s.ext.EnumNameSerializer // Reverted: Removed ShortClassNameTypeHints from import
   import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
 
   // Define a custom serializer for the DataSourceConfig sealed trait
@@ -111,9 +111,12 @@ object OracleConfigFetcher {
   // A common way is to add a "type" field in the JSON.
   // If JSON structure for sourceConfig is like:
   // { "fileConfig": { ... } } OR { "hiveConfig": { ... } }
-  // json4s can often handle this.
+  // json4s can often handle this. Or we use type hints.
 
-  implicit val formats: Formats = DefaultFormats + new EnumNameSerializer(FileFormat) + FieldSerializer[SourceFileConfig]() + FieldSerializer[SourceHiveTableConfig]()
+  implicit val formats: Formats = DefaultFormats +
+    new EnumNameSerializer(FileFormat) +
+    FieldSerializer[SourceFileConfig]() +
+    FieldSerializer[SourceHiveTableConfig]() // Reverted to FieldSerializer
 
 
   /**
@@ -125,10 +128,14 @@ object OracleConfigFetcher {
    */
   def fetchConfig(reconJobId: String, apiBaseUrl: String): Option[ReconciliationJobConfig] = {
     val apiUrl = s"$apiBaseUrl/$reconJobId"
-    val apiKey = "dummy-key-value" // Placeholder for actual API key retrieval
+    val apiKeyFromEnv = sys.env.get("RECON_API_KEY")
+    val apiKey = apiKeyFromEnv.getOrElse {
+      println("WARN: RECON_API_KEY environment variable not set. Using dummy API key.")
+      "dummy-key-value"
+    }
     val timeoutMillis = 30000 // 30 seconds connect and read timeout
 
-    println(s"INFO: Attempting to fetch configuration for job ID: $reconJobId from $apiUrl")
+    println(s"INFO: Attempting to fetch configuration for job ID: $reconJobId from $apiUrl (using API key from env: ${apiKeyFromEnv.isDefined})")
 
     Try {
       val response = requests.get(

@@ -12,7 +12,7 @@
         <scala.version>2.11.12</scala.version>
         <scala.compat.version>2.11</scala.compat.version>
         <spark.version>2.4.8</spark.version>
-        <scalatest.version>3.0.8</scalatest.version>
+        <scalatest.version>2.2.6</scalatest.version> <!-- Downgraded ScalaTest -->
         <maven.compiler.source>1.8</maven.compiler.source>
         <maven.compiler.target>1.8</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -113,15 +113,13 @@
             <version>3.5.5</version>
         </dependency>
 
-        <!-- Spark Testing Base for easier Spark unit testing (Temporarily commented out) -->
-        <!--
+        <!-- Spark Testing Base for easier Spark unit testing -->
         <dependency>
             <groupId>com.holdenkarau</groupId>
             <artifactId>spark-testing-base_${scala.compat.version}</artifactId>
-            <version>${spark.version}_0.14.0</version>
+            <version>2.4.5_0.14.0</version> <!-- Trying specific available version for Spark 2.4.x / Scala 2.11 -->
             <scope>test</scope>
         </dependency>
-        -->
 
     </dependencies>
 
@@ -153,7 +151,7 @@
             <plugin>
                 <groupId>net.alchim31.maven</groupId>
                 <artifactId>scala-maven-plugin</artifactId>
-                <version>4.4.0</version> <!-- Use a recent version -->
+                <version>4.4.0</version> <!-- Reverting to previously working version for main compile -->
                 <executions>
                     <execution>
                         <goals>
@@ -186,6 +184,28 @@
                     <source>${maven.compiler.source}</source>
                     <target>${maven.compiler.target}</target>
                 </configuration>
+            </plugin>
+
+            <!-- ScalaTest Maven Plugin for running ScalaTest tests -->
+            <plugin>
+                <groupId>org.scalatest</groupId>
+                <artifactId>scalatest-maven-plugin</artifactId>
+                <version>2.2.0</version> <!-- Or a more recent version -->
+                <configuration>
+                    <reportsDirectory>${project.build.directory}/surefire-reports</reportsDirectory>
+                    <junitxml>.</junitxml>
+                    <filereports>WDF TestSuite.txt</filereports>
+                    <!-- Letting plugin use default discovery; CsvReaderSpec.scala is deleted -->
+                    <!-- Explicit suite/exclude syntax was causing warnings with v2.2.0 -->
+                </configuration>
+                <executions>
+                    <execution>
+                        <id>test</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- Shade plugin to create an uber-jar (optional, but often useful for Spark jobs) -->

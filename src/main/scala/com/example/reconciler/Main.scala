@@ -13,7 +13,6 @@ object Main {
   def main(args: Array[String]): Unit = {
     val jobIdArg = args.headOption.getOrElse("sampleReconJob1") // Default to sample job ID if no arg provided
     val appStartTime = Instant.now().toEpochMilli
-
     println(s"Starting Reconciliation Job: $jobIdArg")
 
     implicit val spark: SparkSession = SparkSession.builder()
@@ -26,8 +25,15 @@ object Main {
     val errorMessages = ListBuffer[String]()
 
     try {
-      // Define a placeholder API base URL. In a real app, this would come from a config file.
-      val apiBaseUrl = "http://your-api-server.com/api/recon-configs" // Replace with actual or make configurable
+      // Determine API Base URL: Spark conf -> CLI arg -> Default
+      val defaultApiBaseUrl = "http://your-api-server.com/api/recon-configs" // Placeholder
+      val apiBaseUrlFromSparkConf = spark.conf.getOption("spark.reconciler.apiBaseUrl")
+      val apiBaseUrlFromCli = if (args.length > 1) Some(args(1)) else None
+
+      val apiBaseUrl = apiBaseUrlFromSparkConf.orElse(apiBaseUrlFromCli).getOrElse {
+        println(s"WARN: API Base URL not found in Spark config (spark.reconciler.apiBaseUrl) or CLI argument. Using default: $defaultApiBaseUrl")
+        defaultApiBaseUrl
+      }
       println(s"INFO: Using API Base URL: $apiBaseUrl")
 
       val jobConfigOpt: Option[ReconciliationJobConfig] = OracleConfigFetcher.fetchConfig(jobIdArg, apiBaseUrl)
