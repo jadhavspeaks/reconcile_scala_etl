@@ -62,7 +62,8 @@ case class HdfsOutputConfig(
 case class HiveOutputConfig(
   databaseName: String,
   summaryTableName: String,
-  mismatchTableName: String
+  mismatchTableName: String, // This might be deprecated or reused if schema is compatible
+  detailTableName: Option[String] = None // New table for all detailed events
 )
 
 case class EmailConfig(
@@ -202,6 +203,12 @@ object OracleConfigFetcher {
         ReconColumnConfig("value", tolerance = Some(0.001)),
         ReconColumnConfig("event_date")
       ),
+      hiveOutput = Some(HiveOutputConfig(
+        databaseName = "recon_reports_db",
+        summaryTableName = "job_summary",
+        mismatchTableName = "job_mismatches_raw", // Could be deprecated
+        detailTableName = Some("job_details")
+      )),
       emailNotifications = Some(EmailConfig(
         recipients = Seq("test@example.com"),
         smtpHost = "smtp.example.com",

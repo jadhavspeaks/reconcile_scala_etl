@@ -5,13 +5,15 @@ import com.example.reconciler.models._ // For ReconciliationJobSummary and its c
 import org.apache.commons.mail.HtmlEmail
 // import org.apache.commons.mail.EmailAuthenticator // Interface - Removed to see if it resolves issue
 import org.apache.commons.mail.DefaultAuthenticator // Class implementing EmailAuthenticator
+import org.slf4j.LoggerFactory // Added for logging
 import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
 
 class EmailService {
+  private val logger = LoggerFactory.getLogger(getClass)
 
   def sendReconReport(summary: ReconciliationJobSummary, emailConfig: EmailConfig): Try[Unit] = {
     if (!emailConfig.enabled) {
-      println("INFO: Email notifications are disabled.")
+      logger.info("Email notifications are disabled.")
       return TrySuccess(())
     }
 
@@ -40,9 +42,9 @@ class EmailService {
       // Fallback text content
       email.setTextMsg(s"Please view this email in an HTML-compatible client to see the full reconciliation report for ${summary.jobName}.")
 
-      println(s"INFO: Sending reconciliation email report for job ${summary.jobId} to ${emailConfig.recipients.mkString(", ")}...")
+      logger.info(s"Sending reconciliation email report for job ${summary.jobId} to ${emailConfig.recipients.mkString(", ")}...")
       email.send()
-      println(s"INFO: Reconciliation email report sent successfully for job ${summary.jobId}.")
+      logger.info(s"Reconciliation email report sent successfully for job ${summary.jobId}.")
     }
   }
 

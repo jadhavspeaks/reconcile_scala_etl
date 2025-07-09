@@ -150,8 +150,7 @@ object Main {
               outputService.saveToHdfs(summary, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hdfsConf)
             }
             jobConfig.hiveOutput.foreach { hiveConf =>
-              // For Hive, sourceOnly and targetOnly might need separate handling if desired
-              outputService.saveToHive(summary, mismatchesDfForOutput, hiveConf)
+              outputService.saveToHive(summary, jobConfig, mismatchesDfForOutput, sourceOnlyDfForOutput, targetOnlyDfForOutput, hiveConf)
             }
             jobConfig.emailNotifications.filter(_.enabled).foreach { emailConf =>
                val emailService = new EmailService()

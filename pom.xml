@@ -121,6 +121,21 @@
             <scope>test</scope>
         </dependency>
 
+        <!-- Logging with SLF4J and Logback -->
+        <dependency>
+            <groupId>ch.qos.logback</groupId>
+            <artifactId>logback-classic</artifactId>
+            <version>1.2.3</version> <!-- Commonly used version, compatible with slf4j-api 1.7.x -->
+        </dependency>
+        <!-- slf4j-api is usually brought in transitively by logback-classic or Spark -->
+        <!-- If not, or to force a version:
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+            <version>1.7.25</version>
+        </dependency>
+        -->
+
     </dependencies>
 
     <repositories> <!-- Added repositories which might have been missing -->

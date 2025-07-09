@@ -5,10 +5,12 @@ import com.example.reconciler.models._
 import org.apache.spark.sql.{DataFrame, Row, SparkSession} // Added Row
 import org.apache.spark.sql.functions._ // Wildcard import for col, lit, udf, size, explode, struct etc.
 import org.apache.spark.sql.types._ // Wildcard for StructType, ArrayType etc.
+import org.slf4j.LoggerFactory // Added for logging
 import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
 
 
 class ReconciliationService(implicit spark: SparkSession) {
+  private val logger = LoggerFactory.getLogger(getClass)
 
   /**
    * Performs row count comparison between source and target DataFrames.
@@ -127,7 +129,7 @@ class ReconciliationService(implicit spark: SparkSession) {
   ): DataMatchingResult = {
     if (jobConfig.primaryKeyColumns.isEmpty) {
       val errorMsg = "Primary key columns must be defined for data matching."
-      println(s"ERROR: $errorMsg")
+      logger.error(errorMsg)
       // Returning DFs with original schemas but empty data and Failure status
       return DataMatchingResult(Failure, sourceDf.count(), targetDf.count(), spark.emptyDataFrame, sourceDf, targetDf, 0, sourceDf.count(), targetDf.count(), errorMsg)
     }
@@ -159,9 +161,9 @@ class ReconciliationService(implicit spark: SparkSession) {
     val aliasedSourceDf = sourceDf.select(sourceDf.columns.map(c => col(c).as(if (pkCols.contains(c)) c else s"src_$c")): _*)
     val aliasedTargetDf = targetDf.select(targetDf.columns.map(c => col(c).as(if (pkCols.contains(c)) c else s"tgt_$c")): _*)
 
-    println(s"INFO: Performing full outer join on PKs: ${pkCols.mkString(", ")}")
+    logger.info(s"Performing full outer join on PKs: ${pkCols.mkString(", ")}")
     val joinedDf = aliasedSourceDf.join(aliasedTargetDf, pkCols, "full_outer")
-    println("INFO: Caching joined DataFrame for matching analysis.")
+    logger.info("Caching joined DataFrame for matching analysis.")
     joinedDf.cache() // Cache for multiple passes
 
     // Conditions for different sets
@@ -216,7 +218,7 @@ class ReconciliationService(implicit spark: SparkSession) {
     joinedDf.unpersist()
 
     val summaryMsg = s"Data Matching: Matched Keys: $matchedKeyCount, Source-Only Keys: $sourceOnlyKeyCount, Target-Only Keys: $targetOnlyKeyCount."
-    println(s"INFO: $summaryMsg")
+    logger.info(summaryMsg)
 
     DataMatchingResult(
       status = Success, // Or Failure if counts indicate issues beyond just presence. For now, Success if runs.
@@ -246,7 +248,7 @@ class ReconciliationService(implicit spark: SparkSession) {
     jobConfig: ReconciliationJobConfig
   ): ValueComparisonResult = {
     if (jobConfig.columnsToCompare.isEmpty) {
-      println("WARN: No columns configured for value comparison.")
+      logger.warn("No columns configured for value comparison.")
       return ValueComparisonResult(Success, spark.emptyDataFrame, matchedDf.count(), 0, Map.empty, "No columns configured for comparison.")
     }
 
@@ -418,7 +420,7 @@ class ReconciliationService(implicit spark: SparkSession) {
     rules: Seq[BusinessRuleConfig]
   )(implicit spark: SparkSession): Seq[BusinessRuleResult] = {
     rules.map { rule =>
-      println(s"INFO: Executing business rule: ${rule.ruleName} - Query: ${rule.sqlQuery}")
+      logger.info(s"Executing business rule: ${rule.ruleName} - Query: ${rule.sqlQuery}")
       Try {
         val df = spark.sql(rule.sqlQuery)
         val actualValueOpt: Option[String] = df.collect().headOption.flatMap { row =>
@@ -440,8 +442,8 @@ class ReconciliationService(implicit spark: SparkSession) {
       } match {
         case TrySuccess(result) => result
         case TryFailure(ex) =>
-          println(s"ERROR: Failed to execute business rule '${rule.ruleName}': ${ex.getMessage}")
-          ex.printStackTrace()
+          logger.error(s"Failed to execute business rule '${rule.ruleName}': ${ex.getMessage}", ex)
+          // ex.printStackTrace() // Logging framework will handle stack trace
           BusinessRuleResult(rule.ruleName, Failure, rule.sqlQuery, rule.expectedResult, None, Some(s"Execution error: ${ex.getMessage}"))
       }
     }
