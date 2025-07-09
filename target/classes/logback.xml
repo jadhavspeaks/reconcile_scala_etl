@@ -1,0 +1,25 @@
+<configuration>
+
+  <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
+    <!-- encoders are assigned the type
+         ch.qos.logback.classic.encoder.PatternLayoutEncoder by default -->
+    <encoder>
+      <pattern>%d{YYYY-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="INFO">
+    <appender-ref ref="STDOUT" />
+  </root>
+
+  <!-- You can set specific log levels for your application's packages -->
+  <logger name="com.example.reconciler" level="INFO"/>
+  <!-- Set to DEBUG or TRACE for more detailed output from your app -->
+
+  <!-- Spark logs can be noisy; you might want to control their verbosity -->
+  <logger name="org.apache.spark" level="WARN"/>
+  <logger name="org.eclipse.jetty" level="INFO"/> <!-- Spark UI, can be noisy -->
+  <logger name="org.apache.hadoop" level="WARN"/>
+
+
+</configuration>
