@@ -100,8 +100,11 @@ case class ReconciliationJobConfig(
 object OracleConfigFetcher {
   import org.json4s._
   import org.json4s.native.JsonMethods._
-  import org.json4s.ext.EnumNameSerializer // Reverted: Removed ShortClassNameTypeHints from import
+  import org.json4s.ext.EnumNameSerializer
+  import org.slf4j.LoggerFactory // Added for logging
   import scala.util.{Try, Success => TrySuccess, Failure => TryFailure}
+
+  private val logger = LoggerFactory.getLogger(OracleConfigFetcher.getClass)
 
   // Define a custom serializer for the DataSourceConfig sealed trait
   // This tells json4s how to distinguish between SourceFileConfig and SourceHiveTableConfig
@@ -131,12 +134,12 @@ object OracleConfigFetcher {
     val apiUrl = s"$apiBaseUrl/$reconJobId"
     val apiKeyFromEnv = sys.env.get("RECON_API_KEY")
     val apiKey = apiKeyFromEnv.getOrElse {
-      println("WARN: RECON_API_KEY environment variable not set. Using dummy API key.")
+      logger.warn("RECON_API_KEY environment variable not set. Using dummy API key.")
       "dummy-key-value"
     }
     val timeoutMillis = 30000 // 30 seconds connect and read timeout
 
-    println(s"INFO: Attempting to fetch configuration for job ID: $reconJobId from $apiUrl (using API key from env: ${apiKeyFromEnv.isDefined})")
+    logger.info(s"Attempting to fetch configuration for job ID: $reconJobId from $apiUrl (using API key from env: ${apiKeyFromEnv.isDefined})")
 
     Try {
       val response = requests.get(
@@ -148,25 +151,23 @@ object OracleConfigFetcher {
 
       if (response.statusCode == 200) {
         val jsonString = response.text()
-        println(s"DEBUG: Received JSON response: $jsonString") // For debugging, remove in prod
+        logger.debug(s"Received JSON response for job $reconJobId: $jsonString")
         parse(jsonString).extract[ReconciliationJobConfig]
       } else {
-        println(s"ERROR: Failed to fetch config for $reconJobId. Status: ${response.statusCode}, Body: ${response.text()}")
+        val errorMsg = s"Failed to fetch config for $reconJobId. Status: ${response.statusCode}, Body: ${response.text()}"
+        logger.error(errorMsg)
         throw new RuntimeException(s"API request failed with status ${response.statusCode}")
       }
     } match {
       case TrySuccess(config) => Some(config)
       case TryFailure(ex: requests.RequestsException) =>
-        println(s"ERROR: HTTP request to API failed for job $reconJobId: ${ex.getMessage}")
-        ex.printStackTrace()
+        logger.error(s"HTTP request to API failed for job $reconJobId: ${ex.getMessage}", ex)
         None
       case TryFailure(ex: org.json4s.MappingException) =>
-        println(s"ERROR: Failed to parse JSON configuration for job $reconJobId: ${ex.getMessage}")
-        ex.printStackTrace()
+        logger.error(s"Failed to parse JSON configuration for job $reconJobId: ${ex.getMessage}", ex)
         None
       case TryFailure(ex) =>
-        println(s"ERROR: An unexpected error occurred while fetching/parsing config for job $reconJobId: ${ex.getMessage}")
-        ex.printStackTrace()
+        logger.error(s"An unexpected error occurred while fetching/parsing config for job $reconJobId: ${ex.getMessage}", ex)
         None
     }
   }

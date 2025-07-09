@@ -52,7 +52,7 @@ class EmailService {
     // Basic HTML structure. This can be significantly improved with CSS and more detailed formatting.
     val sb = new StringBuilder
     sb.append("<html><body>")
-    sb.append(s"<h1>Reconciliation Report: ${summary.jobName}</h1>")
+    sb.append(s"<h1 style='color:${statusColor(summary.overallStatus)};'>Reconciliation Report: ${summary.jobName}</h1>")
     sb.append(s"<p><strong>Job ID:</strong> ${summary.jobId}</p>")
     sb.append(s"<p><strong>Overall Status:</strong> <span style='font-weight:bold; color:${statusColor(summary.overallStatus)}'>${summary.overallStatus}</span></p>")
     sb.append(s"<p><strong>Start Time:</strong> ${new java.util.Date(summary.startTime)}</p>")
